@@ -700,6 +700,85 @@ describe('PosterdbScraper.browseSets', () =>
     expect(browser).toHaveBeenCalledTimes(1)
   })
 
+  it('reuses the sets of a title browsed recently', async () =>
+  {
+    const fetchMock = serve(dunePages())
+
+    const first = await new PosterdbScraper().browseSets('Dune', 2021, 'movie')
+    const calls = fetchMock.mock.calls.length
+    const second = await new PosterdbScraper().browseSets('Dune', 2021, 'movie')
+
+    expect(fetchMock.mock.calls.length).toBe(calls)
+    expect(second).toEqual(first)
+  })
+
+  it('browses again when asked for fresh sets', async () =>
+  {
+    const fetchMock = serve(dunePages())
+    const scraper = new PosterdbScraper()
+
+    await scraper.browseSets('Dune', 2021, 'movie')
+    await scraper.browseSets('Dune', 2021, 'movie', true)
+
+    expect(requests(fetchMock, MEDIA)).toBe(2)
+    expect(requests(fetchMock, SET_30)).toBe(2)
+  })
+
+  it('browses again once the remembered sets are old', async () =>
+  {
+    const fetchMock = serve(dunePages())
+    const scraper = new PosterdbScraper()
+    await scraper.browseSets('Dune', 2021, 'movie')
+
+    const later = Date.now() + 7 * 60 * 60 * 1000
+    vi.spyOn(Date, 'now').mockReturnValue(later)
+    try
+    {
+      await scraper.browseSets('Dune', 2021, 'movie')
+    }
+    finally
+    {
+      vi.restoreAllMocks()
+    }
+
+    expect(requests(fetchMock, MEDIA)).toBe(2)
+  })
+
+  it('does not remember a browse whose set page failed to load', async () =>
+  {
+    const { [SET_30]: _, ...withoutSet } = dunePages()
+    const fetchMock = serve(withoutSet)
+    const scraper = new PosterdbScraper()
+    fakeBrowser(scraper, () => '')
+
+    expect((await scraper.browseSets('Dune', 2021, 'movie')).sets.map(s => s.id)).toEqual(['10', '20'])
+    await scraper.browseSets('Dune', 2021, 'movie')
+
+    expect(requests(fetchMock, MEDIA)).toBe(2)
+  })
+
+  it('shows an avatar that resolved after the first open when the title is reopened', async () =>
+  {
+    const pages = dunePages()
+    let releaseBob: () => void = () => {}
+    const bobReady = new Promise<void>(resolve => { releaseBob = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+    {
+      if (url === profileUrl('bob')) await bobReady
+      const body = pages[url]
+      return body === undefined ? { ok: false, status: 404, text: async () => '' } : { ok: true, status: 200, text: async () => body }
+    }))
+    const scraper = new PosterdbScraper()
+
+    const first = await scraper.browseSets('Dune', 2021, 'movie')
+    expect(first.sets[1].uploaderAvatar).toBe(guessedAvatarUrl('bob'))
+
+    releaseBob()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const second = await scraper.browseSets('Dune', 2021, 'movie')
+    expect(second.sets[1].uploaderAvatar).toBe(`${BASE}/images/users/avatars/avatar-01.webp`)
+  })
+
   it('does not wait for a slow profile page', async () =>
   {
     const pages = dunePages()

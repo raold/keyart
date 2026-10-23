@@ -584,9 +584,38 @@ export function mediaCacheKey(title: string, year: number | undefined, type: Pos
   return `${type}|${normalizeTitle(title)}|${year ?? ''}`
 }
 
-/** Drops every remembered title match and avatar (Settings -> Clear cached data, and tests). */
+/** How long a title's browsed sets are reused; the panel's Refresh skips them. */
+const BROWSE_TTL = 6 * 60 * 60 * 1000
+/** Titles whose browsed sets are kept; the oldest are dropped first. */
+const MAX_REMEMBERED_BROWSES = 200
+
+/** Recent browse results by title, kept without avatars (those are attached on every read). */
+const browseCache = new Map<string, { result: PosterdbBrowseResult; at: number }>()
+
+function rememberBrowse(key: string, result: PosterdbBrowseResult): void {
+  browseCache.delete(key)
+  browseCache.set(key, { result, at: Date.now() })
+  if (browseCache.size > MAX_REMEMBERED_BROWSES) browseCache.delete(browseCache.keys().next().value as string)
+}
+
+/**
+ * Attaches uploader avatars: from a finished lookup, or else whatever is known now.
+ *
+ * @param sets - Set summaries.
+ * @param avatars - Results of a finished lookup, or null to use the cache and guesses.
+ * @returns The sets with `uploaderAvatar` where one is known.
+ */
+function withAvatars(sets: PosterSetSummary[], avatars: Map<string, string | null> | null): PosterSetSummary[] {
+  return sets.map(s => {
+    const avatar = avatars ? avatars.get(s.uploader.toLowerCase()) : interimAvatar(s.uploader)
+    return avatar ? { ...s, uploaderAvatar: avatar } : s
+  })
+}
+
+/** Drops every remembered title match, browse and avatar (Settings -> Clear cached data, and tests). */
 export function resetPosterdbCaches(): void {
   mediaIdCache.clear()
+  browseCache.clear()
   avatarCache.clear()
 }
 
@@ -881,10 +910,20 @@ export class PosterdbScraper extends BaseScraper {
    * @returns Set summaries, most-downloaded first, with a flag when the site has more.
    */
   async browseSets(title: string, year: number | undefined, type: PosterdbMediaType, fresh = false): Promise<PosterdbBrowseResult> {
+    const label = `${type} "${title}"${year ? ` (${year})` : ''}`
+    const cacheKey = mediaCacheKey(title, year, type)
+    const remembered = browseCache.get(cacheKey)
+    if (remembered && !fresh && Date.now() - remembered.at < BROWSE_TTL) {
+      Logger.scrape('PosterDB', `Browse ${label} - ${remembered.result.sets.length} set(s), remembered`)
+      return { ...remembered.result, sets: withAvatars(remembered.result.sets, null) }
+    }
+
     const media = await this.findMedia(title, year, type, fresh)
     if (!media || this._aborted) return NO_RESULT
     const mediaUrl = `${BASE}/posters/${media.mediaId}`
 
+    // Only a browse where every page loaded is remembered.
+    let complete = true
     const stubs: SetStub[] = []
     const seen = new Set<string>()
     let lastPageFull = false
@@ -892,6 +931,7 @@ export class PosterdbScraper extends BaseScraper {
       const url = page > 1 ? `${mediaUrl}?page=${page}` : mediaUrl
       const cards = await this._loadPage(url, 'div.overlay[data-poster-id]', parseCards, isEmptyMediaPage)
       if (!cards?.length) {
+        if (cards === null) complete = false
         lastPageFull = false
         break
       }
@@ -928,7 +968,10 @@ export class PosterdbScraper extends BaseScraper {
         // "<Set name> Set By <uploader> | The Poster Database (TPDb)"
         name: cleanSetName($('title').first().text().split(/\s+Set By\s+/i)[0]),
       }))
-      if (!parsed?.cards.length) return null
+      if (!parsed?.cards.length) {
+        complete = false
+        return null
+      }
       const posters = classifySetPosters(cardsToPosters(parsed.cards), title, year, type)
       return stubToSummary(stub, posters, parsed.name || stub.card.title, type)
     })
@@ -939,16 +982,10 @@ export class PosterdbScraper extends BaseScraper {
       avatarsP,
       new Promise<null>(resolve => setTimeout(() => resolve(null), AVATAR_GRACE_MS)),
     ])
-    const sets = summaries
-      .filter((s): s is PosterSetSummary => s !== null && s.posters.length > 0)
-      .map(s => {
-        const avatar = avatars ? avatars.get(s.uploader.toLowerCase()) : interimAvatar(s.uploader)
-        return avatar ? { ...s, uploaderAvatar: avatar } : s
-      })
-    Logger.scrape(
-      'PosterDB',
-      `Browse ${type} "${title}"${year ? ` (${year})` : ''} - ${sets.length} set(s) from ${mediaUrl}${capped ? ' (more on the site)' : ''}`,
-    )
+    const found = summaries.filter((s): s is PosterSetSummary => s !== null && s.posters.length > 0)
+    if (complete && !this._aborted) rememberBrowse(cacheKey, { sets: found, capped, mediaUrl })
+    const sets = withAvatars(found, avatars)
+    Logger.scrape('PosterDB', `Browse ${label} - ${sets.length} set(s) from ${mediaUrl}${capped ? ' (more on the site)' : ''}`)
     return { sets, capped, mediaUrl }
   }
 }
