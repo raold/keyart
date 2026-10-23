@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Download, RefreshCw, X, Loader2, Sparkles, Container, BookOpen } from 'lucide-react'
 import { useUpdater } from './UpdaterContext'
 import DockerUpdateModal from './DockerUpdateModal'
+import { displayVersion } from '../../utils/version'
 import styles from './UpdateToast.module.css'
 
 /**
@@ -52,7 +53,7 @@ export default function UpdateToast() {
         <AnimatePresence>
           {status === 'available' && !dismissed && shell(
             <Container size={15} />,
-            `New version ${info?.version ? `v${info.version} ` : ''}available`,
+            `New version ${info?.version ? `v${displayVersion(info.version)} ` : ''}available`,
             <>You're running in Docker. Pull the new image and recreate the container to update.</>,
             <button className={styles.primary} onClick={() => setShowGuide(true)}>
               <BookOpen size={13} /> How to update
@@ -87,7 +88,7 @@ export default function UpdateToast() {
               )
             : shell(
                 <Sparkles size={15} />,
-                `Update available${info?.version ? ` - v${info.version}` : ''}`,
+                `Update available${info?.version ? ` - v${displayVersion(info.version)}` : ''}`,
                 <>A new version is ready to download.</>,
                 <>
                   <button className={styles.primary} onClick={download}><Download size={13} /> Download</button>

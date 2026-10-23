@@ -10,6 +10,7 @@ import { SchedulerService } from '../services/schedulerService'
 import { PlaywrightService } from '../services/playwrightService'
 import { CreatorSetsService } from '../services/creatorSetsService'
 import { ShowStatusService } from '../services/showStatusService'
+import { ttlCached } from '../services/ttlCache'
 import { appEvents } from '../runtime/events'
 import { getAppVersion, isContainerEnv, isWebMode } from '../runtime/runtime'
 import type {
@@ -75,6 +76,9 @@ async function checkGithubRelease(): Promise<{ version?: string; notes?: string;
     return null
   }
 }
+
+// The UI checks on every page load; one GitHub lookup per 6 hours keeps clear of its anonymous rate limit.
+const latestRelease = ttlCached(checkGithubRelease, 6 * 60 * 60 * 1000)
 
 export const handlers = {
   plex: {
@@ -352,7 +356,7 @@ export const handlers = {
           return { available: false, mode: 'desktop' as const }
         }
       }
-      const rel = await checkGithubRelease()
+      const rel = await latestRelease()
       const version = getAppVersion()
       if (rel?.version && isNewer(rel.version, version)) {
         return { available: true, version: rel.version, releaseNotes: rel.notes, releaseUrl: rel.url, mode: 'docker' as const }

@@ -21,6 +21,7 @@ import Checkbox from '../../components/ui/Checkbox'
 import { useUpdater } from '../updater/UpdaterContext'
 import DockerUpdateModal from '../updater/DockerUpdateModal'
 import { useNavStore } from '../../app/navStore'
+import { displayVersion } from '../../utils/version'
 import type { AppConfig, Library, PlexAuthStatus, BrowserStatus, BrowserActionResult, BrowserInstallError, BrowserSource } from '../../../electron/ipc/types'
 import styles from './SettingsPage.module.css'
 
@@ -75,7 +76,7 @@ function ApplicationSection() {
   return (
     <Section icon={<Package size={15} />} title="Application" anchor="application">
       <FieldRow compact label="Version" hint={env?.container ? 'Running in Docker' : lastText}>
-        <span className={styles.versionTag}>v{version || '…'}</span>
+        <span className={styles.versionTag}>v{displayVersion(version) || '…'}</span>
       </FieldRow>
 
       <FieldRow compact label="Updates" hint={isDocker ? 'Docker is updated by pulling a new image' : 'Check GitHub for a newer release'}>
@@ -85,12 +86,12 @@ function ApplicationSection() {
           {isDocker && status === 'available' && (
             <Button variant="primary" size="sm" icon={<BookOpen size={13} />}
               onClick={() => setShowDockerGuide(true)}>
-              v{info?.version} available - how to update
+              v{displayVersion(info?.version ?? '')} available - how to update
             </Button>
           )}
           {!isDocker && status === 'available' && (
             <Button variant="primary" size="sm" icon={<Download size={13} />} onClick={download}>
-              Download v{info?.version}
+              Download v{displayVersion(info?.version ?? '')}
             </Button>
           )}
           {!isDocker && status === 'downloading' && <span className={styles.updHint}><Spinner size="xs" /> Downloading…</span>}

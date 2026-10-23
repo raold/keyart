@@ -53,6 +53,16 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 Your config volume is kept across updates.
 
+## Releasing
+
+Versions are major.minor. To cut release `X.Y`:
+
+1. Set `version` in `package.json` (and the root entry of `package-lock.json`) to `X.Y.0` and commit.
+2. Tag the commit `vX.Y` and push the tag.
+
+CI then publishes `ghcr.io/raold/keyart:X.Y` and `:latest`, plus a GitHub Release. The app shows the version as `X.Y`.
+Push only `vX.Y` tags: any tag starting with `v` moves `latest` and creates a release.
+
 ## Development
 
 Requires Node.js 22.
