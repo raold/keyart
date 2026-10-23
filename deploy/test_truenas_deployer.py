@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -40,9 +41,10 @@ def run_main(argv, api):
 
 class FakeApi:
     def __init__(self, repository, tag, fail_update=False, fail_restore=False, fail_snapshot=None,
-                 fail_port=None):
+                 fail_port=None, state='RUNNING'):
         self.repository = repository
         self.tag = tag
+        self.state = state
         self.original = (repository, tag)
         self.fail_update = fail_update
         self.fail_restore = fail_restore
@@ -50,6 +52,9 @@ class FakeApi:
         self.fail_port = fail_port
         self.calls = []
         self.snapshot_names = []
+
+    def get_state(self, app):
+        return self.state
 
     def get_image_repository(self, app):
         return self.repository
@@ -150,6 +155,32 @@ class DeployTest(unittest.TestCase):
 
 
 class RunTest(unittest.TestCase):
+    def test_waits_when_app_not_running(self):
+        for state in ('STOPPED', 'DEPLOYING'):
+            api = FakeApi(REPO, 'sha-1111111', state=state)
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA) as newest, \
+                    mock.patch.object(deployer, 'image_exists', return_value=True), \
+                    self.assertLogs(deployer.log, 'INFO') as logs:
+                self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: None, lambda _s: None), 0)
+                self.assertEqual(os.listdir(tmp), [])
+            self.assertEqual(api.calls, [])
+            newest.assert_not_called()
+            self.assertEqual(logs.output, [f'INFO:truenas-deployer:keyart: wait: app is {state}'])
+
+    def test_stuck_app_not_running_is_reported_not_touched(self):
+        # The app is on a recorded failed image whose rollback failed, and it is not running.
+        api = FakeApi(REPO, 'sha-2222222', state='CRASHED')
+        with tempfile.TemporaryDirectory() as tmp, self.assertLogs(deployer.log, 'INFO') as logs:
+            with open(os.path.join(tmp, 'keyart.failed'), 'w') as handle:
+                json.dump({'image': REPO, 'tag': 'sha-2222222',
+                           'previous_repository': REPO, 'previous_tag': 'sha-1111111'}, handle)
+            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: None, lambda _s: None), 1)
+        self.assertEqual(api.calls, [])
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].levelname, 'ERROR')
+        self.assertIn('wait: app is CRASHED', logs.output[0])
+
     def test_rolled_back_tag_is_not_retried(self):
         api = FakeApi(REPO, 'sha-1111111')
         with tempfile.TemporaryDirectory() as tmp, \

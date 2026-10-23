@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Keeps a TrueNAS SCALE app on the image of the newest commit on `main`.
 
-Run by cron as root on the server. Each run looks up the newest `main` commit
-and, once CI has published `<image>:sha-<7 hex>` for it, snapshots the app's
-data dataset, points the app at that tag and waits for `/api/health` to report
-the commit. If it doesn't, the previous image is put back and the failed deploy
+Run by cron as root on the server. A run leaves an app that is not RUNNING
+alone. Otherwise it looks up the newest `main` commit and, once CI has
+published `<image>:sha-<7 hex>` for it, snapshots the app's data dataset,
+points the app at that tag and waits for `/api/health` to report the
+commit. If it doesn't, the previous image is put back and the failed deploy
 is recorded in --state-dir, so that tag is not tried again; if putting it back
 fails, every later run retries that and exits non-zero. Older commits are never
 deployed. Without --go nothing changes. Decisions go to stdout, warnings and
@@ -238,6 +239,15 @@ class TrueNASApi:
         with Client() as client:
             return client.call('app.config', app)
 
+    def get_state(self, app: str) -> str:
+        from truenas_api_client import Client
+
+        with Client() as client:
+            found = client.call('app.query', [['name', '=', app]])
+        if not found:
+            raise RuntimeError(f'there is no app named {app}')
+        return found[0]['state']
+
     def get_image_repository(self, app: str) -> str:
         return self._config(app)['image']['repository']
 
@@ -287,14 +297,25 @@ def _read_record(path: str) -> dict:
 
 def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
         sleep: Callable[[float], None]) -> int:
-    """One pass: decide, then (with --go) deploy and prune. Returns the exit code."""
+    """One pass: unless the app is stopped or starting, decide, then (with --go)
+    deploy and prune. Returns the exit code."""
     app = args.app
+    state = api.get_state(app)
     repository, current = api.get_image_repository(app), api.get_image_tag(app)
     running = f'{repository}:{current}'
     # The last deploy that did not finish: its tag and the image it replaced.
     failed_path = os.path.join(args.state_dir, f'{app}.failed')
     failed = _read_record(failed_path)
-    if (failed.get('image'), failed.get('tag')) == (repository, current):
+    stuck = (failed.get('image'), failed.get('tag')) == (repository, current)
+    if state != 'RUNNING':
+        if stuck:
+            log.error('%s: wait: app is %s, on %s, whose deploy failed and was not rolled back; '
+                      'not touching it while it is not running, put %s:%s back by hand',
+                      app, state, running, failed['previous_repository'], failed['previous_tag'])
+            return 1
+        log.info('%s: wait: app is %s', app, state)
+        return 0
+    if stuck:
         previous = (failed['previous_repository'], failed['previous_tag'])
         log.error('%s: running %s, whose deploy failed and was not rolled back; %s %s:%s',
                   app, running, 'restoring' if args.go else 'dry run, would restore', *previous)
