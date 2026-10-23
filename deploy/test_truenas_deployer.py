@@ -76,6 +76,7 @@ class FakeApi:
         self.local_tags = []
         self.fail_remove = set()
         self.fail_list = None
+        self.fail_list_snapshots = None
 
     def get_state(self, app):
         return self.state
@@ -107,6 +108,8 @@ class FakeApi:
         self.snapshot_names.append(f'tank/ix-apps/app_mounts/{app}@{name}')
 
     def snapshots(self, app):
+        if self.fail_list_snapshots:
+            raise self.fail_list_snapshots
         return list(self.snapshot_names)
 
     def destroy_snapshot(self, name):
@@ -283,6 +286,25 @@ class RunTest(unittest.TestCase):
             self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
         self.assertEqual(seen,[{'image': REPO, 'tag': 'sha-2222222',
                                  'previous_repository': REPO, 'previous_tag': 'sha-1111111'}])
+
+    def test_prune_error_after_deploy_keeps_the_deploy(self):
+        api = FakeApi(REPO, 'sha-1111111')
+        api.fail_list_snapshots = subprocess.CalledProcessError(1, ['zfs', 'list'], stderr='pool is busy')
+        healthy = {'ok': True, 'commit': NEW_SHA}
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO') as logs:
+            args = make_args(tmp, '--go')
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_once(args, api, healthy)
+            self.assertEqual(api.tag, 'sha-2222222')
+            self.assertFalse(os.path.exists(os.path.join(tmp, 'keyart.failed')))
+
+            # The next run sees a healthy deploy, not one to roll back.
+            api.fail_list_snapshots = None
+            self.assertEqual(run_once(args, api, healthy), 0)
+        self.assertEqual(api.tag, 'sha-2222222')
+        self.assertEqual(len([call for call in api.calls if call[0] == 'set_image']), 1)
+        self.assertIn('INFO:truenas-deployer:keyart: current, running ghcr.io/raold/keyart:sha-2222222', logs.output)
 
     def test_error_before_switch_writes_no_record(self):
         failure = subprocess.CalledProcessError(1, ['zfs', 'snapshot'], stderr='dataset is busy')

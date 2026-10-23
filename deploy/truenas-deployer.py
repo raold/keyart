@@ -408,13 +408,15 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
                  app, args.image, target, running, api.dataset(app), port)
         return 0
     log.info('%s: deploy %s:%s (running %s)', app, args.image, target, running)
-    # Written right before the switch and cleared once deployed, so a failure
-    # before the switch never marks the commit, and anything after it does.
+    # Written right before the switch and cleared as soon as the deploy is healthy,
+    # so a failure before the switch never marks the commit, and anything after it does.
     record = {'image': args.image, 'tag': target, 'previous_repository': repository, 'previous_tag': current}
     try:
         result = deploy(api, app, target, lambda: probe(port), sleep, timeout_s=args.timeout,
                         repository=args.image, before_switch=lambda: _write_record(failed_path, record),
                         clock=clock)
+        if result == 'deployed':
+            _clear_record(failed_path)
     finally:
         for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
             api.destroy_snapshot(name)
@@ -422,7 +424,6 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
     log.info('%s: %s %s', app, result, target)
     if result != 'deployed':
         return 1
-    _clear_record(failed_path)
     # Keep the new image and the one it replaced (the rollback target).
     _remove_old_images(api, app, args.image, (target, current))
     return 0
