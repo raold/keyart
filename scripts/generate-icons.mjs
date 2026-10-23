@@ -7,6 +7,8 @@
  *   resources/icon-small.svg  simplified tile (used at <= 32px ICO entries)
  *   resources/tray.svg        transparent tray glyph (>= 32px)
  *   resources/tray-small.svg  tray glyph for native tray sizes (<= 24px)
+ *   src/public/favicon.svg    browser tab icon (served as-is)
+ *   .github/assets/logo.svg   README logo, also the home-screen icon
  *
  * Outputs:
  *   resources/icon.ico        app/installer icon (16,20,24,32,48,64,128,256)
@@ -14,6 +16,8 @@
  *   resources/icons/app-256.png      window + notification icon (runtime)
  *   resources/icons/tray.ico         Windows tray (16,20,24,32,40,48,64)
  *   resources/icons/tray-{16,24,32,48,64}.png  Linux/mac tray fallbacks
+ *   src/public/favicon.ico           fallback for browsers without SVG favicons (16,32,48)
+ *   src/public/apple-touch-icon.png  iOS home screen (180, logo on an opaque background)
  */
 import { Resvg } from '@resvg/resvg-js'
 import { Buffer } from 'node:buffer'
@@ -105,4 +109,13 @@ for (const size of [16, 24, 32, 48, 64])
   writeFileSync(res('icons', `tray-${size}.png`), renderPng(size <= 24 ? traySmall : tray, size))
 }
 
-stdout.write('Icons generated into resources/ and resources/icons/\n')
+// Web: the favicon SVG is the small-size mark; iOS needs an opaque square, so
+// the logo goes on the app's dark background (iOS rounds the corners itself).
+const pub = (...p) => path.join(root, 'src', 'public', ...p)
+const favicon = readFileSync(pub('favicon.svg'), 'utf8')
+writeFileSync(pub('favicon.ico'), packIco([16, 32, 48].map(size => ({ size, png: renderPng(favicon, size) }))))
+const logo = readFileSync(path.join(root, '.github', 'assets', 'logo.svg'), 'utf8')
+  .replace('</defs>', '</defs>\n  <rect width="200" height="200" fill="#11141b"/>')
+writeFileSync(pub('apple-touch-icon.png'), renderPng(logo, 180))
+
+stdout.write('Icons generated into resources/, resources/icons/ and src/public/\n')
