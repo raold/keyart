@@ -4,6 +4,8 @@ import { randomUUID } from 'crypto'
 import type { AppConfig } from '../ipc/types'
 import { getUserDataPath, getLogPath } from '../runtime/paths'
 import { isWebMode } from '../runtime/runtime'
+import { Logger } from './logger'
+import { readJsonFile, writeJsonFileAtomic } from './jsonStore'
 
 const DEFAULTS: AppConfig = {
   baseUrl: 'http://localhost:32400',
@@ -48,19 +50,21 @@ function jsonConfigPath(): string {
   return path.join(getUserDataPath(), 'config.json')
 }
 
+/** get() reads the file on every call; warn about a recovered backup once until the next write replaces the bad file. */
+let backupWarned = false
+
 function readJsonStore(): Partial<AppConfig> {
-  try {
-    const raw = fs.readFileSync(jsonConfigPath(), 'utf8')
-    return JSON.parse(raw) as Partial<AppConfig>
-  } catch {
-    return {}
-  }
+  const file = jsonConfigPath()
+  return readJsonFile(file, backup => {
+    if (backupWarned) return
+    backupWarned = true
+    Logger.warn('Config', `${file} was unreadable; using the last good copy ${backup}`)
+  }) as Partial<AppConfig>
 }
 
 function writeJsonStore(data: Record<string, unknown>): void {
-  const dir = getUserDataPath()
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(jsonConfigPath(), JSON.stringify(data, null, 2), 'utf8')
+  writeJsonFileAtomic(jsonConfigPath(), data)
+  backupWarned = false
 }
 
 /** One-time import from legacy electron-store file (app-config.json). */
@@ -84,9 +88,8 @@ function readRaw(): Partial<AppConfig> {
   return readJsonStore()
 }
 
-function writeKey(key: string, value: unknown): void {
-  const current = readJsonStore()
-  writeJsonStore({ ...current, [key]: value })
+function writeKeys(updates: Record<string, unknown>): void {
+  writeJsonStore({ ...readJsonStore(), ...updates })
 }
 
 function decryptToken(stored: string): string {
@@ -118,7 +121,7 @@ export const ConfigService = {
   async init() {
     migrateLegacyElectronStore()
     if (!readRaw().clientIdentifier) {
-      writeKey('clientIdentifier', randomUUID())
+      writeKeys({ clientIdentifier: randomUUID() })
     }
   },
 
@@ -136,9 +139,7 @@ export const ConfigService = {
     if (updates.token !== undefined) {
       updates.token = encryptToken(updates.token)
     }
-    Object.entries(updates).forEach(([key, value]) => {
-      writeKey(key, value)
-    })
+    writeKeys(updates)
   },
 
   getLogPath(): string {
