@@ -1,6 +1,6 @@
 {
   "name": "keyart",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Pick poster art from MediUX and ThePosterDB and apply it to your Plex library",
   "author": "raold",
   "license": "MIT",
