@@ -1,5 +1,8 @@
 import importlib.util
+import io
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,13 +19,35 @@ OLD_SHA = '1111111' + 'a' * 33
 NEW_SHA = '2222222' + 'b' * 33
 
 
+def make_args(state_dir, *extra):
+    return deployer.parse_args(['--app', 'keyart', '--repo', 'raold/keyart', '--image', REPO,
+                                '--state-dir', state_dir, *extra])
+
+
+def run_main(argv, api):
+    """Runs main with `api` and returns (exit code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(sys, 'stdout', out), mock.patch.object(sys, 'stderr', err), \
+            mock.patch.object(deployer, 'TrueNASApi', return_value=api):
+        try:
+            code = deployer.main(argv)
+        finally:
+            for handler in list(deployer.log.handlers):
+                deployer.log.removeHandler(handler)
+                handler.close()
+    return code, out.getvalue(), err.getvalue()
+
+
 class FakeApi:
-    def __init__(self, repository, tag, fail_update=False, fail_restore=False):
+    def __init__(self, repository, tag, fail_update=False, fail_restore=False, fail_snapshot=None,
+                 fail_port=None):
         self.repository = repository
         self.tag = tag
         self.original = (repository, tag)
         self.fail_update = fail_update
         self.fail_restore = fail_restore
+        self.fail_snapshot = fail_snapshot
+        self.fail_port = fail_port
         self.calls = []
         self.snapshot_names = []
 
@@ -33,6 +58,8 @@ class FakeApi:
         return self.tag
 
     def get_port(self, app):
+        if self.fail_port:
+            raise self.fail_port
         return 30000
 
     def set_image(self, app, repository, tag):
@@ -45,6 +72,8 @@ class FakeApi:
         self.repository, self.tag = repository, tag
 
     def snapshot(self, app, name):
+        if self.fail_snapshot:
+            raise self.fail_snapshot
         self.calls.append(('snapshot', app, name))
         self.snapshot_names.append(f'tank/ix-apps/app_mounts/{app}@{name}')
 
@@ -123,12 +152,11 @@ class DeployTest(unittest.TestCase):
 class RunTest(unittest.TestCase):
     def test_rolled_back_tag_is_not_retried(self):
         api = FakeApi(REPO, 'sha-1111111')
-        args = deployer.parse_args(['--app', 'keyart', '--repo', 'raold/keyart', '--image', REPO, '--go'])
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(deployer, 'STATE_DIR', tmp), \
                 mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA), \
                 mock.patch.object(deployer, 'image_exists', return_value=True), \
                 self.assertLogs(deployer.log, 'INFO'):
+            args = make_args(tmp, '--go')
             self.assertEqual(deployer.run(args, api, lambda _port: None, lambda _s: None), 1)
             updates = [call for call in api.calls if call[0] == 'set_image']
             self.assertEqual(api.tag, 'sha-1111111')
@@ -140,7 +168,10 @@ class RunTest(unittest.TestCase):
         api = FakeApi(REPO, 'sha-1111111', fail_restore=True)
         api.snapshot_names = [f'tank/ix-apps/app_mounts/keyart@keyart-deploy-202610{day:02d}-120000'
                               for day in range(1, 11)]
-        args = deployer.parse_args(['--app', 'keyart', '--repo', 'raold/keyart', '--image', REPO, '--go'])
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        tmp = state_dir.name
+        args = make_args(tmp, '--go')
 
         def run():
             return deployer.run(args, api, lambda _port: None, lambda _s: None)
@@ -148,15 +179,13 @@ class RunTest(unittest.TestCase):
         def snapshots_taken():
             return len([call for call in api.calls if call[0] == 'snapshot'])
 
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(deployer, 'STATE_DIR', tmp), \
-                mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA), \
+        with mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA), \
                 mock.patch.object(deployer, 'image_exists', return_value=True), \
                 self.assertLogs(deployer.log, 'INFO') as logs:
             with self.assertRaises(deployer.RollbackFailed):
                 run()
             self.assertEqual(api.tag, 'sha-2222222')
-            self.assertTrue(os.path.exists(os.path.join(tmp, 'truenas-deployer-keyart.failed')))
+            self.assertTrue(os.path.exists(os.path.join(tmp, 'keyart.failed')))
             self.assertEqual(len(api.snapshot_names), 10)
             self.assertNotIn('tank/ix-apps/app_mounts/keyart@keyart-deploy-20261001-120000', api.snapshot_names)
 
@@ -181,6 +210,150 @@ class LockTest(unittest.TestCase):
             path = os.path.join(tmp, 'deployer.lock')
             self.assertTrue(deployer.acquire_lock(path))
             self.assertFalse(deployer.acquire_lock(path))
+
+
+class PrivateDirTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+
+    def test_creates_missing_dir_0700(self):
+        path = os.path.join(self.tmp, 'state')
+        deployer.private_dir(path, create=True)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o700)
+
+    def test_dry_run_creates_nothing(self):
+        path = os.path.join(self.tmp, 'state')
+        deployer.private_dir(path, create=False)
+        self.assertFalse(os.path.exists(path))
+
+    def test_accepts_own_dir_others_cannot_write(self):
+        os.chmod(self.tmp, 0o755)
+        deployer.private_dir(self.tmp, create=True)
+
+    def test_refuses_writable_by_others(self):
+        os.chmod(self.tmp, 0o777)
+        with self.assertRaisesRegex(deployer.UnsafeDir, 'writable by group or others'):
+            deployer.private_dir(self.tmp, create=True)
+        os.chmod(self.tmp, 0o770)
+        with self.assertRaises(deployer.UnsafeDir):
+            deployer.private_dir(self.tmp, create=False)
+
+    def test_refuses_other_owner(self):
+        os.chmod(self.tmp, 0o700)
+        with mock.patch.object(deployer.os, 'getuid', return_value=os.stat(self.tmp).st_uid + 1), \
+                self.assertRaisesRegex(deployer.UnsafeDir, 'owned by uid'):
+            deployer.private_dir(self.tmp, create=True)
+
+    def test_refuses_symlink(self):
+        os.chmod(self.tmp, 0o700)
+        link = os.path.join(self.tmp, 'link')
+        os.symlink(self.tmp, link)
+        with self.assertRaisesRegex(deployer.UnsafeDir, 'not a directory'):
+            deployer.private_dir(link, create=True)
+
+
+class LoggingTest(unittest.TestCase):
+    def test_warnings_and_errors_go_to_stderr(self):
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'deployer.log')
+            with mock.patch.object(sys, 'stdout', out), mock.patch.object(sys, 'stderr', err):
+                deployer.setup_logging(path)
+                try:
+                    deployer.log.info('decision line')
+                    deployer.log.warning('warning line')
+                    try:
+                        raise KeyError('boom')
+                    except KeyError:
+                        deployer.log.exception('error line')
+                finally:
+                    for handler in list(deployer.log.handlers):
+                        deployer.log.removeHandler(handler)
+                        handler.close()
+            with open(path, encoding='utf-8') as handle:
+                logged = handle.read()
+        self.assertIn('decision line', out.getvalue())
+        self.assertNotIn('warning line', out.getvalue())
+        self.assertNotIn('error line', out.getvalue())
+        self.assertNotIn('decision line', err.getvalue())
+        self.assertIn('warning line', err.getvalue())
+        self.assertIn('error line', err.getvalue())
+        for line in ('decision line', 'warning line', 'error line', 'Traceback', "KeyError: 'boom'"):
+            self.assertIn(line, logged)
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.lock_dir = os.path.join(self.tmp, 'run')
+        self.state_dir = os.path.join(self.tmp, 'state')
+        for patch in (mock.patch.object(deployer, 'LOCK_DIR', self.lock_dir),
+                      mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA),
+                      mock.patch.object(deployer, 'image_exists', return_value=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def argv(self, *extra):
+        return ['--app', 'keyart', '--repo', 'raold/keyart', '--image', REPO,
+                '--state-dir', self.state_dir, *extra]
+
+    def test_go_creates_private_lock_and_state_dirs(self):
+        code, out, err = run_main(self.argv('--go'), FakeApi(REPO, 'sha-2222222'))
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn('current', out)
+        for path in (self.lock_dir, self.state_dir):
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o700)
+        self.assertTrue(os.path.exists(os.path.join(self.lock_dir, 'keyart.lock')))
+
+    def test_dry_run_creates_no_dirs(self):
+        code, _out, _err = run_main(self.argv(), FakeApi(REPO, 'sha-2222222'))
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.lock_dir))
+        self.assertFalse(os.path.exists(self.state_dir))
+
+    def test_refuses_unsafe_lock_dir(self):
+        os.mkdir(self.lock_dir, 0o700)
+        os.chmod(self.lock_dir, 0o777)
+        with mock.patch.object(deployer, 'run') as run:
+            code, out, err = run_main(self.argv('--go'), FakeApi(REPO, 'sha-1111111'))
+        self.assertEqual((code, out), (1, ''))
+        run.assert_not_called()
+        self.assertIn(f'refusing to run: {self.lock_dir}', err)
+
+    def test_refuses_unsafe_state_dir(self):
+        os.mkdir(self.state_dir, 0o700)
+        os.chmod(self.state_dir, 0o757)
+        with mock.patch.object(deployer, 'run') as run:
+            code, _out, err = run_main(self.argv(), FakeApi(REPO, 'sha-1111111'))
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+        self.assertIn(f'refusing to run: {self.state_dir}', err)
+
+    def test_zfs_error_shows_its_stderr(self):
+        failure = subprocess.CalledProcessError(
+            1, ['zfs', 'snapshot', '-r', 'tank/apps/keyart@keyart-deploy-x'],
+            stderr=b"cannot create snapshot 'tank/apps/keyart@keyart-deploy-x': out of space\n")
+        api = FakeApi(REPO, 'sha-1111111', fail_snapshot=failure)
+        code, out, err = run_main(self.argv('--go'), api)
+        self.assertEqual(code, 1)
+        self.assertIn('zfs snapshot -r tank/apps/keyart@keyart-deploy-x exited 1', err)
+        self.assertIn('out of space', err)
+        self.assertNotIn('out of space', out)
+
+    def test_unexpected_error_logs_traceback_to_file(self):
+        path = os.path.join(self.tmp, 'deployer.log')
+        api = FakeApi(REPO, 'sha-1111111', fail_port=KeyError('ports'))
+        code, _out, err = run_main(self.argv('--log', path), api)
+        self.assertEqual(code, 1)
+        self.assertIn("failed: KeyError: 'ports'", err)
+        with open(path, encoding='utf-8') as handle:
+            logged = handle.read()
+        self.assertIn('Traceback', logged)
+        self.assertIn('get_port', logged)
 
 
 if __name__ == '__main__':

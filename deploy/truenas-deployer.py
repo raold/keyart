@@ -4,9 +4,11 @@
 Run by cron as root on the server. Each run looks up the newest `main` commit
 and, once CI has published `<image>:sha-<7 hex>` for it, snapshots the app's
 data dataset, points the app at that tag and waits for `/api/health` to report
-the commit. If it doesn't, the previous image is put back and that tag is not
-tried again; if putting it back fails, every later run retries that and exits
-non-zero. Older commits are never deployed. Without --go nothing changes.
+the commit. If it doesn't, the previous image is put back and the failed deploy
+is recorded in --state-dir, so that tag is not tried again; if putting it back
+fails, every later run retries that and exits non-zero. Older commits are never
+deployed. Without --go nothing changes. Decisions go to stdout, warnings and
+errors to stderr.
 
     truenas-deployer.py --app keyart --repo raold/keyart --image ghcr.io/raold/keyart [--go]
 """
@@ -17,6 +19,7 @@ import http.client
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -27,8 +30,10 @@ from typing import Callable
 
 SNAPSHOT_PREFIX = 'keyart-deploy-'
 POLL_INTERVAL_S = 5
-# Lock and the last rolled-back tag; cleared on reboot, which allows one retry.
-STATE_DIR = '/run/lock'
+# The run lock: a directory only root can write, on tmpfs, so a reboot clears it.
+LOCK_DIR = '/run/truenas-deployer'
+# The failed-deploy record lives here by default (see --state-dir) and survives reboots.
+DEFAULT_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.truenas-deployer-state')
 USER_AGENT = 'keyart-truenas-deployer'
 # CI attaches provenance, so a tag is usually an index rather than a single manifest.
 MANIFEST_TYPES = ', '.join([
@@ -48,6 +53,10 @@ class RegistryAccessDenied(Exception):
 
 class RollbackFailed(Exception):
     """Putting the previous image back failed; the app may still run the new one."""
+
+
+class UnsafeDir(Exception):
+    """A lock or state directory someone other than the current user could change."""
 
 
 def short_sha(sha: str) -> str:
@@ -133,6 +142,39 @@ def acquire_lock(path: str) -> bool:
         return False
     _held_locks[path] = handle
     return True
+
+
+def private_dir(path: str, create: bool) -> None:
+    """Makes sure `path` is a directory owned by the current user that group and
+    others cannot write, creating it with mode 0700 when `create` is set. A
+    missing directory is fine without `create`. Raises UnsafeDir otherwise."""
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if create:
+            raise
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        problem = 'is not a directory'
+    elif info.st_uid != os.getuid():
+        problem = f'is owned by uid {info.st_uid}, not {os.getuid()}'
+    elif info.st_mode & 0o022:
+        problem = f'is writable by group or others (mode {stat.S_IMODE(info.st_mode):o})'
+    else:
+        return
+    raise UnsafeDir(f'refusing to run: {path} {problem}; fix or remove it')
+
+
+def command_error(err: subprocess.CalledProcessError) -> str:
+    """Describes a failed command: its arguments, exit code and stderr."""
+    stderr = err.stderr.decode(errors='replace') if isinstance(err.stderr, bytes) else err.stderr or ''
+    command = ' '.join(map(str, err.cmd)) if isinstance(err.cmd, (list, tuple)) else str(err.cmd)
+    return f'{command} exited {err.returncode}: {stderr.strip() or "(no error output)"}'
 
 
 def _get_json(url: str, headers: dict | None = None) -> dict:
@@ -250,7 +292,7 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
     repository, current = api.get_image_repository(app), api.get_image_tag(app)
     running = f'{repository}:{current}'
     # The last deploy that did not finish: its tag and the image it replaced.
-    failed_path = os.path.join(STATE_DIR, f'truenas-deployer-{app}.failed')
+    failed_path = os.path.join(args.state_dir, f'{app}.failed')
     failed = _read_record(failed_path)
     if (failed.get('image'), failed.get('tag')) == (repository, current):
         previous = (failed['previous_repository'], failed['previous_tag'])
@@ -309,33 +351,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--image', required=True, help='image repository, e.g. ghcr.io/OWNER/REPO')
     parser.add_argument('--keep-snapshots', type=_positive, default=10, help='deploy snapshots to keep (default 10)')
     parser.add_argument('--log', help='also append each decision to this file')
+    parser.add_argument('--state-dir', default=DEFAULT_STATE_DIR,
+                        help='where the failed-deploy record is kept (default: .truenas-deployer-state '
+                             'next to this script)')
     parser.add_argument('--go', action='store_true', help='make changes (default: dry run)')
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def setup_logging(log_file: str | None) -> None:
+    """Sends decisions (INFO) to stdout, warnings and errors to stderr only, and
+    everything, tracebacks included, to `log_file` when given; UTC timestamps."""
     formatter = logging.Formatter('%(asctime)s %(message)s', '%Y-%m-%dT%H:%M:%SZ')
     formatter.converter = time.gmtime
-    handlers = [logging.StreamHandler(sys.stdout)]
-    if args.log:
-        handlers.append(logging.FileHandler(args.log, encoding='utf-8'))
+    stdout = logging.StreamHandler(sys.stdout)
+    stdout.addFilter(lambda record: record.levelno < logging.WARNING)
+    stderr = logging.StreamHandler(sys.stderr)
+    stderr.setLevel(logging.WARNING)
+    handlers = [stdout, stderr]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
     for handler in handlers:
         handler.setFormatter(formatter)
         log.addHandler(handler)
     log.setLevel(logging.INFO)
 
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    setup_logging(args.log)
     try:
-        if args.go and not acquire_lock(os.path.join(STATE_DIR, f'truenas-deployer-{args.app}.lock')):
-            log.info('%s: another deployer run is still going, exiting', args.app)
-            return 0
+        if args.go:
+            private_dir(LOCK_DIR, create=True)
+            if not acquire_lock(os.path.join(LOCK_DIR, f'{args.app}.lock')):
+                log.info('%s: another deployer run is still going, exiting', args.app)
+                return 0
+        private_dir(args.state_dir, create=args.go)
         return run(args, TrueNASApi(), probe_health, time.sleep)
     except RollbackFailed:
         pass  # already logged
-    except RegistryAccessDenied as err:
+    except (RegistryAccessDenied, UnsafeDir) as err:
         log.error('%s: %s', args.app, err)
+    except subprocess.CalledProcessError as err:
+        log.error('%s: failed: %s', args.app, command_error(err))
     except Exception as err:
-        log.error('%s: failed: %s: %s', args.app, type(err).__name__, err)
+        log.exception('%s: failed: %s: %s', args.app, type(err).__name__, err)
     return 1
 
 
