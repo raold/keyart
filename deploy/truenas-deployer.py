@@ -5,7 +5,8 @@ Run by cron as root on the server. Each run looks up the newest `main` commit
 and, once CI has published `<image>:sha-<7 hex>` for it, snapshots the app's
 data dataset, points the app at that tag and waits for `/api/health` to report
 the commit. If it doesn't, the previous image is put back and that tag is not
-tried again. Older commits are never deployed. Without --go nothing changes.
+tried again; if putting it back fails, every later run retries that and exits
+non-zero. Older commits are never deployed. Without --go nothing changes.
 
     truenas-deployer.py --app keyart --repo raold/keyart --image ghcr.io/raold/keyart [--go]
 """
@@ -45,6 +46,10 @@ class RegistryAccessDenied(Exception):
     """The registry refused an anonymous pull: the package is private or not published."""
 
 
+class RollbackFailed(Exception):
+    """Putting the previous image back failed; the app may still run the new one."""
+
+
 def short_sha(sha: str) -> str:
     """Returns the 7-character form of a commit SHA used in `sha-` image tags."""
     return sha[:7]
@@ -75,13 +80,22 @@ def snapshots_to_prune(names: list[str], prefix: str, keep: int) -> list[str]:
     return ours[:max(len(ours) - keep, 0)]
 
 
+def _restore(api, app: str, previous: tuple[str, str]) -> None:
+    try:
+        api.set_image(app, *previous)
+    except Exception as err:
+        log.error('%s: restoring %s:%s failed: %s', app, *previous, err)
+        raise RollbackFailed(f'restoring {previous[0]}:{previous[1]} failed: {err}') from err
+
+
 def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
            sleep: Callable[[float], None], timeout_s: float = 180,
            repository: str | None = None) -> str:
     """Snapshots the app's data, switches it to `repository:target_tag` (default:
     its current repository) and polls `probe` until the app reports the tag's
     commit. Puts the previous image back when the update fails or `timeout_s`
-    passes. Returns 'deployed' or 'rolled-back'."""
+    passes. Returns 'deployed' or 'rolled-back'; raises RollbackFailed when the
+    previous image could not be put back."""
     previous = (api.get_image_repository(app), api.get_image_tag(app))
     commit = target_tag.removeprefix('sha-')
     api.snapshot(app, SNAPSHOT_PREFIX + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'))
@@ -89,7 +103,7 @@ def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
         api.set_image(app, repository or previous[0], target_tag)
     except Exception as err:
         log.warning('%s: update to %s failed (%s), restoring %s:%s', app, target_tag, err, *previous)
-        api.set_image(app, *previous)
+        _restore(api, app, previous)
         return 'rolled-back'
     waited = 0.0
     while True:
@@ -102,7 +116,7 @@ def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
         waited += POLL_INTERVAL_S
     log.warning('%s: %s not healthy after %ds (last report: %s), restoring %s:%s',
                 app, target_tag, timeout_s, json.dumps(report), *previous)
-    api.set_image(app, *previous)
+    _restore(api, app, previous)
     return 'rolled-back'
 
 
@@ -220,23 +234,36 @@ class TrueNASApi:
         _zfs('destroy', '-r', name)
 
 
-def _read(path: str) -> str:
+def _read_record(path: str) -> dict:
     try:
         with open(path) as handle:
-            return handle.read().strip()
-    except FileNotFoundError:
-        return ''
+            record = json.load(handle)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
 
 
 def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
         sleep: Callable[[float], None]) -> int:
     """One pass: decide, then (with --go) deploy and prune. Returns the exit code."""
     app = args.app
+    repository, current = api.get_image_repository(app), api.get_image_tag(app)
+    running = f'{repository}:{current}'
+    # The last deploy that did not finish: its tag and the image it replaced.
+    failed_path = os.path.join(STATE_DIR, f'truenas-deployer-{app}.failed')
+    failed = _read_record(failed_path)
+    if (failed.get('image'), failed.get('tag')) == (repository, current):
+        previous = (failed['previous_repository'], failed['previous_tag'])
+        log.error('%s: running %s, whose deploy failed and was not rolled back; %s %s:%s',
+                  app, running, 'restoring' if args.go else 'dry run, would restore', *previous)
+        if args.go:
+            _restore(api, app, previous)
+            log.info('%s: rolled-back %s', app, current)
+        return 1
+
     commit = newest_main_commit(args.repo)
     tag = f'sha-{short_sha(commit)}'
     target = tag if image_exists(args.image, tag) else None
-    repository, current = api.get_image_repository(app), api.get_image_tag(app)
-    running = f'{repository}:{current}'
     decision = decide(current if repository == args.image else running, target)
     if decision == 'wait':
         log.info('%s: wait, no image for the newest main commit %s yet (running %s)', app, tag, running)
@@ -244,9 +271,8 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
     if decision == 'current':
         log.info('%s: current, running %s', app, running)
         return 0
-    failed_path = os.path.join(STATE_DIR, f'truenas-deployer-{app}.failed')
-    if _read(failed_path) == target:
-        log.info('%s: wait, %s was rolled back; waiting for a newer main commit (running %s)', app, target, running)
+    if failed.get('tag') == target:
+        log.info('%s: wait, %s failed to deploy; waiting for a newer main commit (running %s)', app, target, running)
         return 0
     port = api.get_port(app)
     if not args.go:
@@ -254,14 +280,18 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
                  app, args.image, target, running, api.dataset(app), port)
         return 0
     log.info('%s: deploy %s:%s (running %s)', app, args.image, target, running)
-    result = deploy(api, app, target, lambda: probe(port), sleep, repository=args.image)
-    if result == 'rolled-back':
-        with open(failed_path, 'w') as handle:
-            handle.write(target + '\n')
+    result = 'failed'
+    try:
+        result = deploy(api, app, target, lambda: probe(port), sleep, repository=args.image)
+    finally:
+        if result != 'deployed':
+            with open(failed_path, 'w') as handle:
+                json.dump({'image': args.image, 'tag': target,
+                           'previous_repository': repository, 'previous_tag': current}, handle)
+        for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
+            api.destroy_snapshot(name)
+            log.info('%s: pruned snapshot %s', app, name)
     log.info('%s: %s %s', app, result, target)
-    for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
-        api.destroy_snapshot(name)
-        log.info('%s: pruned snapshot %s', app, name)
     return 0 if result == 'deployed' else 1
 
 
@@ -300,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             log.info('%s: another deployer run is still going, exiting', args.app)
             return 0
         return run(args, TrueNASApi(), probe_health, time.sleep)
+    except RollbackFailed:
+        pass  # already logged
     except RegistryAccessDenied as err:
         log.error('%s: %s', args.app, err)
     except Exception as err:

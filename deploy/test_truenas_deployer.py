@@ -17,10 +17,12 @@ NEW_SHA = '2222222' + 'b' * 33
 
 
 class FakeApi:
-    def __init__(self, repository, tag, fail_update=False):
+    def __init__(self, repository, tag, fail_update=False, fail_restore=False):
         self.repository = repository
         self.tag = tag
+        self.original = (repository, tag)
         self.fail_update = fail_update
+        self.fail_restore = fail_restore
         self.calls = []
         self.snapshot_names = []
 
@@ -38,6 +40,8 @@ class FakeApi:
         if self.fail_update:
             self.fail_update = False
             raise RuntimeError('image pull failed')
+        if self.fail_restore and (repository, tag) == self.original:
+            raise RuntimeError('middleware error')
         self.repository, self.tag = repository, tag
 
     def snapshot(self, app, name):
@@ -130,6 +134,45 @@ class RunTest(unittest.TestCase):
             self.assertEqual(api.tag, 'sha-1111111')
             self.assertEqual(deployer.run(args, api, lambda _port: None, lambda _s: None), 0)
             self.assertEqual([call for call in api.calls if call[0] == 'set_image'], updates)
+
+    def test_failed_rollback_is_recorded_and_retried(self):
+        # The new image never reports healthy and putting the old one back fails.
+        api = FakeApi(REPO, 'sha-1111111', fail_restore=True)
+        api.snapshot_names = [f'tank/ix-apps/app_mounts/keyart@keyart-deploy-202610{day:02d}-120000'
+                              for day in range(1, 11)]
+        args = deployer.parse_args(['--app', 'keyart', '--repo', 'raold/keyart', '--image', REPO, '--go'])
+
+        def run():
+            return deployer.run(args, api, lambda _port: None, lambda _s: None)
+
+        def snapshots_taken():
+            return len([call for call in api.calls if call[0] == 'snapshot'])
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(deployer, 'STATE_DIR', tmp), \
+                mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA), \
+                mock.patch.object(deployer, 'image_exists', return_value=True), \
+                self.assertLogs(deployer.log, 'INFO') as logs:
+            with self.assertRaises(deployer.RollbackFailed):
+                run()
+            self.assertEqual(api.tag, 'sha-2222222')
+            self.assertTrue(os.path.exists(os.path.join(tmp, 'truenas-deployer-keyart.failed')))
+            self.assertEqual(len(api.snapshot_names), 10)
+            self.assertNotIn('tank/ix-apps/app_mounts/keyart@keyart-deploy-20261001-120000', api.snapshot_names)
+
+            # Still failing: the next run retries the rollback, takes no snapshot and is not "current".
+            with self.assertRaises(deployer.RollbackFailed):
+                run()
+            self.assertEqual(snapshots_taken(), 1)
+            self.assertFalse(any(': current,' in line for line in logs.output))
+
+            # Middleware recovered: the rollback goes through, then the tag is skipped.
+            api.fail_restore = False
+            self.assertEqual(run(), 1)
+            self.assertEqual((api.repository, api.tag), (REPO, 'sha-1111111'))
+            self.assertEqual(run(), 0)
+            self.assertEqual(snapshots_taken(), 1)
+            self.assertEqual(api.tag, 'sha-1111111')
 
 
 class LockTest(unittest.TestCase):

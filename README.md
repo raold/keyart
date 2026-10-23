@@ -82,7 +82,8 @@ Then run it every 5 minutes as root (System > Advanced Settings > Cron Jobs):
 
 Snapshots are named `<dataset>@keyart-deploy-<UTC time>`; the newest 10 are kept (`--keep-snapshots N`).
 `--log FILE` also appends each decision to a file. A run that starts while another is still going exits at once.
-The exit code is non-zero after a rollback or an error.
+The exit code is non-zero after a rollback or an error. If the previous image can't be put back, every run retries
+that and exits non-zero until it works.
 
 ## Backing up and restoring /config
 
