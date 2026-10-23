@@ -101,7 +101,8 @@ def _restore(api, app: str, previous: tuple[str, str]) -> None:
 def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
            sleep: Callable[[float], None], timeout_s: float = 180,
            repository: str | None = None,
-           before_switch: Callable[[], None] | None = None) -> str:
+           before_switch: Callable[[], None] | None = None,
+           clock: Callable[[], float] = time.monotonic) -> str:
     """Snapshots the app's data, switches it to `repository:target_tag` (default:
     its current repository) and polls `probe` until the app reports the tag's
     commit. Puts the previous image back when the update fails or `timeout_s`
@@ -119,15 +120,14 @@ def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
         log.warning('%s: update to %s failed (%s), restoring %s:%s', app, target_tag, err, *previous)
         _restore(api, app, previous)
         return 'rolled-back'
-    waited = 0.0
+    deadline = clock() + timeout_s
     while True:
         report = probe()
         if health_ok(report, commit):
             return 'deployed'
-        if waited >= timeout_s:
+        if clock() >= deadline:
             break
         sleep(POLL_INTERVAL_S)
-        waited += POLL_INTERVAL_S
     log.warning('%s: %s not healthy after %ds (last report: %s), restoring %s:%s',
                 app, target_tag, timeout_s, json.dumps(report), *previous)
     _restore(api, app, previous)
@@ -316,7 +316,7 @@ def _clear_record(path: str) -> None:
 
 
 def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
-        sleep: Callable[[float], None]) -> int:
+        sleep: Callable[[float], None], clock: Callable[[], float] = time.monotonic) -> int:
     """One pass: unless the app is stopped or starting, decide, then (with --go)
     deploy and prune. Returns the exit code."""
     app = args.app
@@ -367,8 +367,9 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
     # before the switch never marks the commit, and anything after it does.
     record = {'image': args.image, 'tag': target, 'previous_repository': repository, 'previous_tag': current}
     try:
-        result = deploy(api, app, target, lambda: probe(port), sleep, repository=args.image,
-                        before_switch=lambda: _write_record(failed_path, record))
+        result = deploy(api, app, target, lambda: probe(port), sleep, timeout_s=args.timeout,
+                        repository=args.image, before_switch=lambda: _write_record(failed_path, record),
+                        clock=clock)
     finally:
         for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
             api.destroy_snapshot(name)
@@ -392,6 +393,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--repo', required=True, help='GitHub repository, OWNER/REPO')
     parser.add_argument('--image', required=True, help='image repository, e.g. ghcr.io/OWNER/REPO')
     parser.add_argument('--keep-snapshots', type=_positive, default=10, help='deploy snapshots to keep (default 10)')
+    parser.add_argument('--timeout', type=_positive, default=180,
+                        help='seconds to wait for the new image to report healthy (default 180)')
     parser.add_argument('--log', help='also append each decision to this file')
     parser.add_argument('--state-dir', default=DEFAULT_STATE_DIR,
                         help='where the failed-deploy record is kept (default: .truenas-deployer-state '

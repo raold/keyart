@@ -25,6 +25,12 @@ def make_args(state_dir, *extra):
                                 '--state-dir', state_dir, *extra])
 
 
+def run_once(args, api, report=None):
+    """One deployer pass whose health probe always answers `report`, on a fake clock."""
+    clock = FakeClock()
+    return deployer.run(args, api, lambda _port: report, clock.sleep, clock)
+
+
 def run_main(argv, api):
     """Runs main with `api` and returns (exit code, stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
@@ -37,6 +43,21 @@ def run_main(argv, api):
                 deployer.log.removeHandler(handler)
                 handler.close()
     return code, out.getvalue(), err.getvalue()
+
+
+class FakeClock:
+    """A monotonic clock that moves only when the code sleeps or a probe takes time."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class FakeApi:
@@ -125,33 +146,54 @@ class DeployTest(unittest.TestCase):
     def test_deploy_success(self):
         api = FakeApi(REPO, 'sha-1111111')
         reports = iter([None, {'ok': True, 'commit': NEW_SHA}])
-        sleeps = []
-        result = deployer.deploy(api, 'keyart', 'sha-2222222', lambda: next(reports), sleeps.append)
+        clock = FakeClock()
+        result = deployer.deploy(api, 'keyart', 'sha-2222222', lambda: next(reports), clock.sleep, clock=clock)
         self.assertEqual(result, 'deployed')
         self.assertEqual([call[0] for call in api.calls], ['snapshot', 'set_image'])
         self.assertTrue(api.calls[0][2].startswith('keyart-deploy-'))
         self.assertEqual(api.calls[1], ('set_image', 'keyart', REPO, 'sha-2222222'))
-        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(clock.sleeps, [deployer.POLL_INTERVAL_S])
 
     def test_deploy_rolls_back(self):
         # Starts, but keeps reporting the commit it replaced.
         api = FakeApi('keyart', '1.0.2')
-        sleeps = []
+        clock = FakeClock()
         with self.assertLogs(deployer.log, 'WARNING'):
             result = deployer.deploy(api, 'keyart', 'sha-2222222',
-                                     lambda: {'ok': True, 'commit': OLD_SHA}, sleeps.append,
-                                     timeout_s=30, repository=REPO)
+                                     lambda: {'ok': True, 'commit': OLD_SHA}, clock.sleep,
+                                     timeout_s=30, repository=REPO, clock=clock)
         self.assertEqual(result, 'rolled-back')
         self.assertEqual(api.calls[1], ('set_image', 'keyart', REPO, 'sha-2222222'))
         self.assertEqual(api.calls[-1], ('set_image', 'keyart', 'keyart', '1.0.2'))
-        self.assertGreaterEqual(sum(sleeps), 30)
+        self.assertGreaterEqual(sum(clock.sleeps), 30)
+
+    def test_health_wait_uses_a_deadline(self):
+        # Each probe hangs for 5 s (its own timeout), so counting sleeps alone would wait about twice as long.
+        api = FakeApi(REPO, 'sha-1111111')
+        clock = FakeClock()
+        start = clock.now
+        probes = []
+
+        def slow_probe():
+            probes.append(clock.now - start)
+            clock.now += 5
+            return None
+
+        with self.assertLogs(deployer.log, 'WARNING'):
+            result = deployer.deploy(api, 'keyart', 'sha-2222222', slow_probe, clock.sleep,
+                                     timeout_s=30, clock=clock)
+        self.assertEqual(result, 'rolled-back')
+        self.assertEqual(probes, [0, 10, 20, 30])
+        self.assertLessEqual(clock.now - start, 30 + 5)
 
     def test_deploy_rolls_back_when_update_fails(self):
         api = FakeApi(REPO, 'sha-1111111', fail_update=True)
+        clock = FakeClock()
         with self.assertLogs(deployer.log, 'WARNING'):
-            result = deployer.deploy(api, 'keyart', 'sha-2222222', lambda: None, lambda _s: None)
+            result = deployer.deploy(api, 'keyart', 'sha-2222222', lambda: None, clock.sleep, clock=clock)
         self.assertEqual(result, 'rolled-back')
         self.assertEqual(api.calls[-1], ('set_image', 'keyart', REPO, 'sha-1111111'))
+        self.assertEqual(clock.sleeps, [])
 
 
 class RunTest(unittest.TestCase):
@@ -162,7 +204,7 @@ class RunTest(unittest.TestCase):
                     mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA) as newest, \
                     mock.patch.object(deployer, 'image_exists', return_value=True), \
                     self.assertLogs(deployer.log, 'INFO') as logs:
-                self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: None, lambda _s: None), 0)
+                self.assertEqual(run_once(make_args(tmp, '--go'), api), 0)
                 self.assertEqual(os.listdir(tmp), [])
             self.assertEqual(api.calls, [])
             newest.assert_not_called()
@@ -175,7 +217,7 @@ class RunTest(unittest.TestCase):
             with open(os.path.join(tmp, 'keyart.failed'), 'w') as handle:
                 json.dump({'image': REPO, 'tag': 'sha-2222222',
                            'previous_repository': REPO, 'previous_tag': 'sha-1111111'}, handle)
-            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: None, lambda _s: None), 1)
+            self.assertEqual(run_once(make_args(tmp, '--go'), api), 1)
         self.assertEqual(api.calls, [])
         self.assertEqual(len(logs.records), 1)
         self.assertEqual(logs.records[0].levelname, 'ERROR')
@@ -194,7 +236,7 @@ class RunTest(unittest.TestCase):
             with open(record, 'w') as handle:
                 json.dump({'image': REPO, 'tag': 'sha-0000000',
                            'previous_repository': REPO, 'previous_tag': 'sha-1111111'}, handle)
-            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: healthy, lambda _s: None), 0)
+            self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
             self.assertEqual(api.tag, 'sha-2222222')
             self.assertFalse(os.path.exists(record))
 
@@ -211,8 +253,8 @@ class RunTest(unittest.TestCase):
 
             api.set_image = recording_set_image
             healthy = {'ok': True, 'commit': NEW_SHA}
-            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: healthy, lambda _s: None), 0)
-        self.assertEqual(seen, [{'image': REPO, 'tag': 'sha-2222222',
+            self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
+        self.assertEqual(seen,[{'image': REPO, 'tag': 'sha-2222222',
                                  'previous_repository': REPO, 'previous_tag': 'sha-1111111'}])
 
     def test_error_before_switch_writes_no_record(self):
@@ -223,14 +265,25 @@ class RunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
             args = make_args(tmp, '--go')
             with self.assertRaises(subprocess.CalledProcessError):
-                deployer.run(args, api, lambda _port: healthy, lambda _s: None)
+                run_once(args, api, healthy)
             self.assertEqual(os.listdir(tmp), [])
             self.assertEqual(api.calls, [])
 
             # The commit is not poisoned: once zfs works, the next run deploys it.
             api.fail_snapshot = None
-            self.assertEqual(deployer.run(args, api, lambda _port: healthy, lambda _s: None), 0)
+            self.assertEqual(run_once(args, api, healthy), 0)
             self.assertEqual(api.tag, 'sha-2222222')
+
+    def test_timeout_option_bounds_the_health_wait(self):
+        self.assertEqual(make_args('/state').timeout, 180)
+        api = FakeApi(REPO, 'sha-1111111')
+        clock = FakeClock()
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            args = make_args(tmp, '--go', '--timeout', '20')
+            self.assertEqual(deployer.run(args, api, lambda _port: None, clock.sleep, clock), 1)
+        self.assertEqual(sum(clock.sleeps), 20)
+        self.assertEqual(api.tag, 'sha-1111111')
 
     def test_rolled_back_tag_is_not_retried(self):
         api = FakeApi(REPO, 'sha-1111111')
@@ -239,10 +292,10 @@ class RunTest(unittest.TestCase):
                 mock.patch.object(deployer, 'image_exists', return_value=True), \
                 self.assertLogs(deployer.log, 'INFO'):
             args = make_args(tmp, '--go')
-            self.assertEqual(deployer.run(args, api, lambda _port: None, lambda _s: None), 1)
+            self.assertEqual(run_once(args, api), 1)
             updates = [call for call in api.calls if call[0] == 'set_image']
             self.assertEqual(api.tag, 'sha-1111111')
-            self.assertEqual(deployer.run(args, api, lambda _port: None, lambda _s: None), 0)
+            self.assertEqual(run_once(args, api), 0)
             self.assertEqual([call for call in api.calls if call[0] == 'set_image'], updates)
 
     def test_failed_rollback_is_recorded_and_retried(self):
@@ -256,7 +309,7 @@ class RunTest(unittest.TestCase):
         args = make_args(tmp, '--go')
 
         def run():
-            return deployer.run(args, api, lambda _port: None, lambda _s: None)
+            return run_once(args, api)
 
         def snapshots_taken():
             return len([call for call in api.calls if call[0] == 'snapshot'])
