@@ -14,6 +14,7 @@ import {
   createSession, destroySession, isValidSession, parseSessionCookie,
   sessionCookieHeader, clearSessionCookie,
 } from './session'
+import { createShutdown } from './shutdown'
 import type { FastifyRequest, FastifyReply } from 'fastify'
 
 const PORT = parseInt(process.env.PORT ?? '3939', 10)
@@ -35,6 +36,10 @@ function staticDir(): string {
     Logger.warn('Server', `No frontend build at ${indexPath} - run "npm run build:web" and restart`)
   }
   return dir
+}
+
+function errorDetail(err: unknown): string {
+  return err instanceof Error ? (err.stack ?? err.message) : String(err)
 }
 
 function hasPlexToken(): boolean {
@@ -60,6 +65,24 @@ export async function startServer() {
   // Config writes can carry the whole applied-poster history, which outgrows
   // Fastify's 1 MiB default once a few creators have been synced.
   const app = Fastify({ logger: false, bodyLimit: 32 * 1024 * 1024 })
+
+  // The server owns the signals so a `docker stop` ends in a clean exit rather
+  // than a SIGKILL after the grace period.
+  const shutdown = createShutdown({
+    stopScheduler: () => SchedulerService.shutdown(),
+    closeServer: () => app.close(),
+    exit: code => process.exit(code),
+    log: msg => Logger.info('Server', msg),
+  })
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
+  process.on('unhandledRejection', err => {
+    Logger.error('Server', `Unhandled rejection: ${errorDetail(err)}`)
+  })
+  process.on('uncaughtException', err => {
+    Logger.error('Server', `Uncaught exception: ${errorDetail(err)}`)
+    process.exit(1)
+  })
 
   // Per-client request budget for the web API: generous enough for the
   // UI's bursts, tight enough to blunt brute force. The browser routes below

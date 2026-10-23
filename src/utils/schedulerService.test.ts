@@ -484,3 +484,31 @@ describe('SchedulerService.init', () =>
     }
   })
 })
+
+describe('SchedulerService.shutdown', () =>
+{
+  it('stops every cron task and clears the watch and heartbeat timers', async () =>
+  {
+    const { default: cron } = await import('node-cron')
+    SchedulerService.shutdown()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try
+    {
+      state.config.scheduledJobs = [job(), job({ id: 'job-2' })]
+      SchedulerService.init(null)
+      SchedulerService.startEngineHeartbeat()
+      const stops = vi.mocked(cron.schedule).mock.results.map(r => (r.value as { stop: ReturnType<typeof vi.fn> }).stop)
+      expect(stops).toHaveLength(2)
+      expect(vi.getTimerCount()).toBe(2)
+
+      SchedulerService.shutdown()
+
+      for (const stop of stops) expect(stop).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    finally
+    {
+      vi.useRealTimers()
+    }
+  })
+})
