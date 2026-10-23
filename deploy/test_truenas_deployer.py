@@ -339,6 +339,26 @@ class RunTest(unittest.TestCase):
             self.assertEqual(api.tag, 'sha-1111111')
 
 
+class GitHubTest(unittest.TestCase):
+    def test_newest_main_commit_reads_the_bare_sha(self):
+        requests = []
+
+        def urlopen(request, timeout):
+            requests.append(request)
+            return io.BytesIO(NEW_SHA.encode())
+
+        with mock.patch.object(deployer.urllib.request, 'urlopen', urlopen):
+            self.assertEqual(deployer.newest_main_commit('raold/keyart'), NEW_SHA)
+        self.assertEqual(requests[0].full_url, 'https://api.github.com/repos/raold/keyart/commits/main')
+        self.assertEqual(requests[0].get_header('Accept'), 'application/vnd.github.sha')
+
+    def test_newest_main_commit_rejects_anything_else(self):
+        for body in (b'{"sha": "' + NEW_SHA.encode() + b'"}', b'2222222', b''):
+            with mock.patch.object(deployer.urllib.request, 'urlopen', lambda _request, timeout: io.BytesIO(body)), \
+                    self.assertRaisesRegex(RuntimeError, 'not a commit SHA'):
+                deployer.newest_main_commit('raold/keyart')
+
+
 class LockTest(unittest.TestCase):
     def test_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:

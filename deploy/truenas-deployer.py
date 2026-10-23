@@ -20,6 +20,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -190,8 +191,13 @@ def _get_json(url: str, headers: dict | None = None) -> dict:
 
 def newest_main_commit(repo: str) -> str:
     """Returns the full SHA of the newest commit on the repo's `main` branch."""
-    url = f'https://api.github.com/repos/{repo}/commits/main'
-    return _get_json(url, {'Accept': 'application/vnd.github+json'})['sha']
+    request = urllib.request.Request(f'https://api.github.com/repos/{repo}/commits/main',
+                                     headers={'User-Agent': USER_AGENT, 'Accept': 'application/vnd.github.sha'})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        sha = response.read(100).decode('ascii', errors='replace').strip()
+    if not re.fullmatch('[0-9a-f]{40}', sha):
+        raise RuntimeError(f'GitHub answered {sha[:60]!r} for the newest commit on main, not a commit SHA')
+    return sha
 
 
 def image_exists(image: str, tag: str) -> bool:
