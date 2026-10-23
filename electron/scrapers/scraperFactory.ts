@@ -1,0 +1,244 @@
+import pLimit from 'p-limit'
+import { PosterdbScraper, posterdbUrlType, type PosterdbBrowseResult, type PosterdbMediaType } from './posterdbScraper'
+import { MediuxScraper } from './mediuxScraper'
+import { BaseScraper } from './baseScraper'
+import { Logger } from '../services/logger'
+import { ConfigService } from '../services/config'
+import type { PosterInfo, ScrapeProgress } from '../ipc/types'
+import { classifyUrl, type ScraperSource } from './urlSource'
+
+export { classifyUrl, type ScraperSource }
+
+// Scraper instances are reused across calls within a session
+let _posterdb: PosterdbScraper | null = null
+let _mediux: MediuxScraper | null = null
+let _aborted = false
+
+// The library browser gets its own ThePosterDB instance: a scrape session's
+// abort() and close() must not cut off or orphan a browse in progress.
+let _browsePosterdb: PosterdbScraper | null = null
+let _browsesInFlight = 0
+
+function getPosterdb(): PosterdbScraper {
+  if (!_posterdb) _posterdb = new PosterdbScraper()
+  return _posterdb
+}
+
+function getMediux(): MediuxScraper {
+  if (!_mediux) _mediux = new MediuxScraper()
+  return _mediux
+}
+
+function getScraper(source: ScraperSource): BaseScraper | null {
+  if (source === 'posterdb') return getPosterdb()
+  if (source === 'mediux')   return getMediux()
+  return null
+}
+
+export type ProgressCallback = (progress: ScrapeProgress) => void
+
+/** Routes scrape requests to the right site scraper and manages their shared lifecycle. */
+export const ScraperFactory = {
+  /**
+   * Scrapes a single URL, reporting progress along the way.
+   *
+   * @param url - Page to scrape.
+   * @param onProgress - Receives status transitions for the UI.
+   * @param workerId - Worker slot shown in progress events.
+   * @returns The posters found, empty on failure or unsupported URLs.
+   */
+  async scrapeUrl(
+    url: string,
+    onProgress: ProgressCallback,
+    workerId = 0,
+  ): Promise<PosterInfo[]> {
+    if (_aborted) return []
+
+    const source = classifyUrl(url)
+    if (source === 'unknown') {
+      Logger.warn('ScraperFactory', `Unknown URL source: ${url}`)
+      onProgress({ url, status: 'error', error: 'Unsupported URL (must be theposterdb.com or mediux.pro)', workerId })
+      return []
+    }
+
+    const scraper = getScraper(source)!
+    onProgress({ url, status: 'scraping', workerId })
+
+    try {
+      const posters = await scraper.scrape(url)
+      onProgress({ url, status: 'done', posterCount: posters.length, workerId })
+      return posters
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      Logger.error('ScraperFactory', `scrapeUrl failed [${url}]: ${error}`)
+      onProgress({ url, status: 'error', error, workerId })
+      return []
+    }
+  },
+
+  /**
+   * Scrapes multiple URLs concurrently, capped at the configured worker count.
+   *
+   * @param urls - Pages to scrape.
+   * @param onProgress - Receives status transitions for the UI.
+   * @returns Posters keyed by their source URL.
+   */
+  async scrapeMany(
+    urls: string[],
+    onProgress: ProgressCallback,
+  ): Promise<Map<string, PosterInfo[]>> {
+    _aborted = false
+    const cfg = ConfigService.get()
+    const limit = pLimit(Math.max(1, cfg.maxWorkers))
+    const results = new Map<string, PosterInfo[]>()
+
+    const tasks = urls.map((url, i) =>
+      limit(async () => {
+        if (_aborted) return
+        const workerId = (i % cfg.maxWorkers) + 1
+        const posters = await ScraperFactory.scrapeUrl(url, onProgress, workerId)
+        results.set(url, posters)
+      })
+    )
+
+    await Promise.allSettled(tasks)
+    return results
+  },
+
+  /** Aborts all in-flight scrapes. */
+  abort(): void {
+    _aborted = true
+    _posterdb?.abort()
+    _mediux?.abort()
+    Logger.info('ScraperFactory', 'Scrape session aborted')
+  },
+
+  /** Closes scraper browser instances at the end of a session. */
+  async close(): Promise<void> {
+    await Promise.allSettled([
+      _posterdb?.close(),
+      _mediux?.close(),
+    ])
+    _posterdb = null
+    _mediux = null
+    _aborted = false
+    Logger.info('ScraperFactory', 'Scraper browsers closed')
+  },
+
+  /**
+   * Lists MediUX sets for a TMDB title (library browser).
+   *
+   * @param tmdbId - Resolved TMDB id.
+   * @param type - Media type of the title.
+   * @returns Set summaries with uploader metadata.
+   */
+  async browseMediux(tmdbId: string, type: 'movie' | 'show') {
+    return getMediux().browseSets(tmdbId, type)
+  },
+
+  /**
+   * Lists ThePosterDB sets for a title (library browser). Matched by title/year
+   * rather than TMDB - ThePosterDB has no public id lookup - so this works for
+   * items MediUX can't resolve, and returns nothing when the title isn't there.
+   *
+   * @param title - Plex title.
+   * @param year - Release year, when known.
+   * @param type - Movie, show, or collection.
+   * @param fresh - Skip remembered title matches.
+   * @returns The sets found, or an empty result carrying the reason (never throws).
+   */
+  async browsePosterdb(
+    title: string,
+    year: number | undefined,
+    type: PosterdbMediaType,
+    fresh = false,
+  ): Promise<PosterdbBrowseResult & { error?: string }> {
+    const scraper = (_browsePosterdb ??= new PosterdbScraper())
+    _browsesInFlight++
+    try {
+      return await scraper.browseSets(title, year, type, fresh)
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      Logger.warn('ScraperFactory', `browsePosterdb failed for "${title}": ${error}`)
+      return { sets: [], capped: false, error }
+    } finally {
+      // Pages come over plain HTTP; the browser only steps in for a gated
+      // page. Drop it once no browse needs it so neither the desktop app nor
+      // a long-lived container keeps an idle Chromium around.
+      if (--_browsesInFlight === 0) await scraper.close().catch(() => {})
+    }
+  },
+
+  async browseMediuxCollection(
+    collectionTitle: string,
+    tmdbCollectionId: string | undefined,
+    childTmdbIds: string[],
+  ) {
+    return getMediux().browseCollectionSets(collectionTitle, tmdbCollectionId, childTmdbIds)
+  },
+
+  /**
+   * Lists one page of a MediUX creator's sets (a ~24-set window, +12 new/page).
+   *
+   * @param username - Creator to browse.
+   * @param page - 1-based page; not cumulative. Use browseMediuxUserAll for the
+   *   full catalog.
+   * @returns That page's sets with parsed title/year per set.
+   */
+  async browseMediuxUser(username: string, page = 1) {
+    return getMediux().browseUserSets(username, page)
+  },
+
+  /**
+   * Lists a MediUX creator's entire set catalog by crawling and deduping all
+   * pages. Pass `onBatch`/`signal` to stream results and control abort from a
+   * background crawl (see MediuxScraper.browseAllUserSets).
+   *
+   * @param username - Creator to browse.
+   * @param opts - Optional streaming callback and per-crawl abort signal.
+   * @returns Every set the creator owns and whether the page cap stopped it.
+   */
+  async browseMediuxUserAll(
+    username: string,
+    opts: Parameters<ReturnType<typeof getMediux>['browseAllUserSets']>[1] = {},
+  ) {
+    return getMediux().browseAllUserSets(username, opts)
+  },
+
+  /**
+   * Checks whether a URL belongs to a supported scraping source.
+   *
+   * @param url - URL to inspect.
+   * @returns true for theposterdb.com and mediux.pro URLs.
+   */
+  isSupported(url: string): boolean {
+    return classifyUrl(url) !== 'unknown'
+  },
+
+  /**
+   * Returns the URL's source site.
+   *
+   * @param url - URL to inspect.
+   * @returns The source, or null when unsupported.
+   */
+  sourceOf(url: string): 'posterdb' | 'mediux' | null {
+    const src = classifyUrl(url)
+    return src === 'unknown' ? null : src
+  },
+
+  /**
+   * Describes a URL's source and page type for display in the scrape tab.
+   *
+   * @param url - URL to inspect.
+   * @returns The source plus a page-type hint when recognisable.
+   */
+  describeUrl(url: string): { source: ScraperSource; type?: string } {
+    const source = classifyUrl(url)
+    if (source === 'posterdb') return { source, type: posterdbUrlType(url) }
+    if (source === 'mediux') {
+      const type = url.includes('/boxsets/') ? 'boxset' : url.includes('/shows/') ? 'show' : 'set'
+      return { source, type }
+    }
+    return { source }
+  },
+}

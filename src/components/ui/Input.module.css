@@ -1,0 +1,109 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  transition:
+    border-color var(--duration-fast),
+    box-shadow var(--duration-fast);
+  overflow: hidden;
+}
+
+.field.focused {
+  border-color: var(--color-accent-primary);
+  box-shadow: 0 0 0 3px rgba(229, 160, 13, 0.12);
+}
+
+.field.hasError {
+  border-color: var(--color-accent-error);
+}
+
+.field.hasError.focused {
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
+}
+
+/* Sizes */
+.sm .inputWrap { min-height: 32px; }
+.md .inputWrap { min-height: 40px; }
+
+.prefix,
+.suffix {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.prefix { border-right: 1px solid var(--color-border); }
+.suffix { border-left: 1px solid var(--color-border); }
+
+.inputWrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.label {
+  position: absolute;
+  left: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  pointer-events: none;
+  transition:
+    top var(--duration-base) var(--ease-out-expo),
+    font-size var(--duration-base) var(--ease-out-expo),
+    color var(--duration-base);
+  white-space: nowrap;
+}
+
+.label.floated {
+  top: 6px;
+  font-size: var(--text-2xs);
+  color: var(--color-accent-primary);
+  transform: none;
+}
+
+.input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  padding: var(--space-3);
+  padding-top: 18px;
+  caret-color: var(--color-accent-primary);
+}
+
+/* No label - remove float padding */
+.inputWrap:not(:has(.label)) .input {
+  padding-top: var(--space-3);
+}
+
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.error {
+  font-size: var(--text-xs);
+  color: var(--color-accent-error);
+  margin-top: 2px;
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}

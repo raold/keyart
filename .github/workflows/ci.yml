@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: jobs only read the repo. The badge-refresh step authenticates
+# with its own GH_TOKEN secret, not the default token.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Lint, Typecheck & Build
+    runs-on: ubuntu-latest
+
+    # The Electron binary isn't needed to typecheck/build, and its postinstall is
+    # unreliable under Node 22 - skip the download for a fast, deterministic CI.
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm install` (not `npm ci`): the committed lockfile is generated on
+      # Windows and omits a few Linux-only transitive optional deps (@emnapi/*),
+      # which makes the stricter `npm ci` fail on the Linux runner. `npm install`
+      # resolves them cleanly. (The Docker build does the same for this reason.)
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck renderer
+        run: npx tsc --noEmit
+
+      - name: Typecheck main process
+        run: npx tsc -p tsconfig.electron.json --noEmit
+
+      # The web/server build (used by the Docker image) imports deps like
+      # @fastify/static that the renderer/main typechecks don't cover, so
+      # check it here too - this is the path a server dependency bump breaks.
+      - name: Typecheck server
+        run: npx tsc -p tsconfig.server.json --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build renderer
+        run: npx vite build
+
+      - name: Build main process
+        run: npx tsc -p tsconfig.electron.json

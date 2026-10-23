@@ -1,0 +1,83 @@
+# Dependabot configuration for version updates.
+# Security updates run automatically from GitHub's vulnerability alerts and are
+# not controlled here; this file adds routine version updates plus grouping so
+# day-to-day bumps land as a few batched PRs instead of one per dependency.
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates
+version: 2
+updates:
+  # npm dependencies (root package.json / package-lock.json)
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    ignore:
+      # p-limit v4+ is pure ESM. The electron/server build is CommonJS
+      # (compiles to require()), so a major bump risks ERR_REQUIRE_ESM at
+      # runtime - and tsc won't flag it. Stay on v3 until the build goes ESM.
+      - dependency-name: p-limit
+        update-types:
+          - version-update:semver-major
+    groups:
+      # Batch low-risk runtime bumps into a single PR.
+      production:
+        applies-to: version-updates
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      # Batch all tooling/build/test bumps into a single PR.
+      development:
+        applies-to: version-updates
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+      # Batch advisory-driven bumps so a burst of alerts lands as one PR
+      # instead of one per advisory.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    # Major bumps stay as individual PRs so they get reviewed on their own.
+
+  # GitHub Actions used by the CI and release workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Docker base images (docker/Dockerfile).
+  - package-ecosystem: docker
+    directory: "/docker"
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "docker(deps)"
+    ignore:
+      # Stay on the Node 22 base to match ci.yml, build.yml and local dev.
+      # The image already re-pulls the base on every release for security
+      # patches; bump this major deliberately, in lockstep with the toolchain.
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major

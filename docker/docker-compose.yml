@@ -1,0 +1,22 @@
+# Keyart - Docker Compose
+#
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+# Then open http://<host>:3939 and sign in with Plex.
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: keyart
+    container_name: keyart
+    ports:
+      - "3939:3939"
+    environment:
+      - TZ=America/New_York
+      - PORT=3939
+    volumes:
+      - ./config:/config
+    restart: unless-stopped
