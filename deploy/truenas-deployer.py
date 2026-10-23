@@ -188,8 +188,8 @@ def command_error(err: subprocess.CalledProcessError) -> str:
     return f'{command} exited {err.returncode}: {stderr.strip() or "(no error output)"}'
 
 
-def _get_json(url: str, headers: dict | None = None) -> dict:
-    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, **(headers or {})})
+def _get_json(url: str) -> dict:
+    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.load(response)
 

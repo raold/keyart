@@ -124,8 +124,8 @@ class FakeApi:
         if tag in self.fail_remove:
             raise subprocess.CalledProcessError(
                 1, ['docker', 'image', 'rm', f'{repository}:{tag}'],
-                stderr=f'Error response from daemon: conflict: unable to remove repository reference "{repository}:{tag}" '
-                       '- container 0123abcd is using its referenced image')
+                stderr='Error response from daemon: conflict: unable to remove repository reference '
+                       f'"{repository}:{tag}" - container 0123abcd is using its referenced image')
         self.local_tags.remove(tag)
 
 
@@ -336,7 +336,8 @@ class RunTest(unittest.TestCase):
         self.assertEqual(api.local_tags, ['sha-3333333', 'sha-2222222', 'sha-1111111'])
 
         api = FakeApi(REPO, 'sha-1111111')
-        api.fail_list = subprocess.CalledProcessError(1, ['docker', 'image', 'ls'], stderr='Cannot connect to the Docker daemon')
+        api.fail_list = subprocess.CalledProcessError(1, ['docker', 'image', 'ls'],
+                                                      stderr='Cannot connect to the Docker daemon')
         newest, exists = self.patched_lookups()
         with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO') as logs:
             self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
