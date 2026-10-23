@@ -53,6 +53,55 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 Your config volume is kept across updates.
 
+## Auto-deploy on TrueNAS SCALE
+
+`deploy/truenas-deployer.py` keeps a TrueNAS SCALE app on the newest `main` commit. CI publishes
+`ghcr.io/raold/keyart:sha-<7 hex>` for every `main` commit that passes. Each run, the script looks up the newest
+commit on `main` and, once its image is published, snapshots the app's data, points the app at that image and waits
+up to 3 minutes for `/api/health` to report that commit. If it doesn't, the previous image goes back and the commit is
+skipped until a newer one lands. Older commits are never deployed: while CI runs for the newest one, it waits.
+
+It needs:
+
+- keyart installed as a TrueNAS Custom App with `/config` on an ixVolume (that dataset is snapshotted) and a
+  published port (health is checked on `127.0.0.1:<port>`).
+- A public image package on GHCR, so it can be checked and pulled without signing in.
+- Root on the server: it uses the TrueNAS API client and `zfs`.
+
+Copy the script to the server and try it. Without `--go` it only prints what it would do:
+
+```bash
+python3 truenas-deployer.py --app keyart --repo raold/keyart --image ghcr.io/raold/keyart
+```
+
+Then run it every 5 minutes as root (System > Advanced Settings > Cron Jobs):
+
+```
+*/5 * * * * python3 /path/to/truenas-deployer.py --app keyart --repo raold/keyart --image ghcr.io/raold/keyart --go
+```
+
+Snapshots are named `<dataset>@keyart-deploy-<UTC time>`; the newest 10 are kept (`--keep-snapshots N`).
+`--log FILE` also appends each decision to a file. A run that starts while another is still going exits at once.
+The exit code is non-zero after a rollback or an error.
+
+## Backing up and restoring /config
+
+Everything keyart keeps is in `/config`: the Plex sign-in, settings, schedules, applied-art history and creator
+choices. The image holds no state, so a copy of that folder is a full backup. With Compose it is `docker/config`,
+`./docker/run.sh` uses the `keyart-config` volume, and on TrueNAS it is the app's ixVolume dataset.
+
+To back up, snapshot the dataset or volume behind `/config`, or copy the folder while the container is stopped:
+
+```bash
+docker stop keyart
+cp -a docker/config ~/keyart-config-backup
+docker start keyart
+```
+
+To restore, stop keyart, replace the contents of `/config` with the backup (or roll the dataset back to a snapshot,
+including the deployer's `keyart-deploy-*` ones) and start it again. To move keyart to a new host, put the backup in
+place before its first start there.
+
 ## Releasing
 
 Versions are major.minor. To cut release `X.Y`:
