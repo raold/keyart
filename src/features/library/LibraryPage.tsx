@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo, createContext, useContext } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Search, X, Upload, Check, AlertCircle, Loader2, User, Image as ImageIcon, ChevronDown, ChevronUp, Plus, UserPlus, Trash2, CalendarClock, CheckCircle2, RefreshCw, Star, Library, Download, LayoutGrid, Users, Film, Tv, Layers, ArrowUp, ArrowDown, Eye, EyeOff, ExternalLink, Maximize2, Minimize2 } from 'lucide-react'
+import { Search, X, Upload, Check, AlertCircle, Loader2, User, Image as ImageIcon, ChevronDown, ChevronUp, Plus, UserPlus, Trash2, CalendarClock, CheckCircle2, RefreshCw, Star, Library, Download, LayoutGrid, Users, Film, Tv, Layers, ArrowUp, ArrowDown, Eye, EyeOff, ExternalLink, Maximize2, Minimize2, ArrowLeft } from 'lucide-react'
 import type { ScheduledJob } from '../../../electron/ipc/types'
 import Badge from '../../components/ui/Badge'
 import Button from '../../components/ui/Button'
@@ -293,6 +293,38 @@ function MyLibraryView({ targetSection, targetItem }: { targetSection: string | 
     })
     return () => { unsub() }
   }, [loadSections])
+
+  // Browser back (a mouse's back button) closes the sets panel: opening it adds a
+  // history entry, and closing it any other way takes that entry back off.
+  const panelOpen = selected !== null
+  useEffect(() => {
+    // After a reload with the panel open its entry is still on top; the panel starts closed.
+    if (history.state?.keyartPanel) history.replaceState(null, '')
+    return () => { if (history.state?.keyartPanel) history.back() }
+  }, [])
+  useEffect(() => {
+    if (!panelOpen) {
+      if (history.state?.keyartPanel) history.back()
+      return
+    }
+    if (!history.state?.keyartPanel) history.pushState({ keyartPanel: true }, '')
+    const onPop = () => setSelected(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || document.querySelector('[aria-modal="true"]')) return
+      const target = e.target instanceof HTMLElement ? e.target : null
+      if (target?.closest('[aria-expanded="true"]')) return
+      // The first Esc leaves a text field, the next one closes the panel.
+      if (target?.matches('input, textarea, [contenteditable="true"]')) { target.blur(); return }
+      setSelected(null)
+    }
+    // Capture phase: an open dropdown still reports itself expanded before its own handler closes it.
+    window.addEventListener('popstate', onPop)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [panelOpen])
 
   // Deep-link from the command palette: jump to a specific library section.
   useEffect(() => {
@@ -1503,6 +1535,12 @@ function SetsPanel({ item, onClose, onItemPoster }: {
         </div>
       )}
       <div className={styles.panelHeader}>
+        {gallery && (
+          <button className={styles.panelBack} onClick={onClose} title="Back to the library (Esc)">
+            <ArrowLeft size={16} />
+            Library
+          </button>
+        )}
         {/* Keyed on item.key: the panel chrome (position, resize handle,
             width) stays mounted across item switches, only this title
             crossfades. */}
@@ -1539,7 +1577,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           >
             <RefreshCw size={14} className={refreshing ? styles.spin : undefined} />
           </button>
-          <button className={styles.panelClose} onClick={onClose}><X size={16} /></button>
+          <button className={styles.panelClose} onClick={onClose} title="Close (Esc)"><X size={16} /></button>
         </div>
       </div>
 

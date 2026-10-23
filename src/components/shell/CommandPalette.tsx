@@ -296,6 +296,8 @@ export default function CommandPalette({ open, onClose, onNavigate, onToggleLogs
       {open && (
         <motion.div
           className={styles.overlay}
+          role="dialog"
+          aria-modal="true"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
