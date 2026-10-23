@@ -181,6 +181,57 @@ class RunTest(unittest.TestCase):
         self.assertEqual(logs.records[0].levelname, 'ERROR')
         self.assertIn('wait: app is CRASHED', logs.output[0])
 
+    def patched_lookups(self):
+        return (mock.patch.object(deployer, 'newest_main_commit', return_value=NEW_SHA),
+                mock.patch.object(deployer, 'image_exists', return_value=True))
+
+    def test_deployed_clears_record(self):
+        api = FakeApi(REPO, 'sha-1111111')
+        healthy = {'ok': True, 'commit': NEW_SHA}
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            record = os.path.join(tmp, 'keyart.failed')
+            with open(record, 'w') as handle:
+                json.dump({'image': REPO, 'tag': 'sha-0000000',
+                           'previous_repository': REPO, 'previous_tag': 'sha-1111111'}, handle)
+            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: healthy, lambda _s: None), 0)
+            self.assertEqual(api.tag, 'sha-2222222')
+            self.assertFalse(os.path.exists(record))
+
+    def test_record_is_written_before_the_switch(self):
+        api = FakeApi(REPO, 'sha-1111111')
+        seen = []
+        set_image = api.set_image
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            def recording_set_image(app, repository, tag):
+                with open(os.path.join(tmp, 'keyart.failed')) as handle:
+                    seen.append(json.load(handle))
+                set_image(app, repository, tag)
+
+            api.set_image = recording_set_image
+            healthy = {'ok': True, 'commit': NEW_SHA}
+            self.assertEqual(deployer.run(make_args(tmp, '--go'), api, lambda _port: healthy, lambda _s: None), 0)
+        self.assertEqual(seen, [{'image': REPO, 'tag': 'sha-2222222',
+                                 'previous_repository': REPO, 'previous_tag': 'sha-1111111'}])
+
+    def test_error_before_switch_writes_no_record(self):
+        failure = subprocess.CalledProcessError(1, ['zfs', 'snapshot'], stderr='dataset is busy')
+        api = FakeApi(REPO, 'sha-1111111', fail_snapshot=failure)
+        healthy = {'ok': True, 'commit': NEW_SHA}
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            args = make_args(tmp, '--go')
+            with self.assertRaises(subprocess.CalledProcessError):
+                deployer.run(args, api, lambda _port: healthy, lambda _s: None)
+            self.assertEqual(os.listdir(tmp), [])
+            self.assertEqual(api.calls, [])
+
+            # The commit is not poisoned: once zfs works, the next run deploys it.
+            api.fail_snapshot = None
+            self.assertEqual(deployer.run(args, api, lambda _port: healthy, lambda _s: None), 0)
+            self.assertEqual(api.tag, 'sha-2222222')
+
     def test_rolled_back_tag_is_not_retried(self):
         api = FakeApi(REPO, 'sha-1111111')
         with tempfile.TemporaryDirectory() as tmp, \
@@ -374,6 +425,7 @@ class MainTest(unittest.TestCase):
         self.assertIn('zfs snapshot -r tank/apps/keyart@keyart-deploy-x exited 1', err)
         self.assertIn('out of space', err)
         self.assertNotIn('out of space', out)
+        self.assertFalse(os.path.exists(os.path.join(self.state_dir, 'keyart.failed')))
 
     def test_unexpected_error_logs_traceback_to_file(self):
         path = os.path.join(self.tmp, 'deployer.log')

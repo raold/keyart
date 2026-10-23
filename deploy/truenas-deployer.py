@@ -100,15 +100,19 @@ def _restore(api, app: str, previous: tuple[str, str]) -> None:
 
 def deploy(api, app: str, target_tag: str, probe: Callable[[], dict | None],
            sleep: Callable[[float], None], timeout_s: float = 180,
-           repository: str | None = None) -> str:
+           repository: str | None = None,
+           before_switch: Callable[[], None] | None = None) -> str:
     """Snapshots the app's data, switches it to `repository:target_tag` (default:
     its current repository) and polls `probe` until the app reports the tag's
     commit. Puts the previous image back when the update fails or `timeout_s`
-    passes. Returns 'deployed' or 'rolled-back'; raises RollbackFailed when the
+    passes. `before_switch` runs after the snapshot, right before the switch.
+    Returns 'deployed' or 'rolled-back'; raises RollbackFailed when the
     previous image could not be put back."""
     previous = (api.get_image_repository(app), api.get_image_tag(app))
     commit = target_tag.removeprefix('sha-')
     api.snapshot(app, SNAPSHOT_PREFIX + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'))
+    if before_switch:
+        before_switch()
     try:
         api.set_image(app, repository or previous[0], target_tag)
     except Exception as err:
@@ -295,6 +299,22 @@ def _read_record(path: str) -> dict:
     return record if isinstance(record, dict) else {}
 
 
+def _write_record(path: str, record: dict) -> None:
+    temp = f'{path}.tmp'
+    with open(temp, 'w') as handle:
+        json.dump(record, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, path)
+
+
+def _clear_record(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
         sleep: Callable[[float], None]) -> int:
     """One pass: unless the app is stopped or starting, decide, then (with --go)
@@ -343,17 +363,18 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
                  app, args.image, target, running, api.dataset(app), port)
         return 0
     log.info('%s: deploy %s:%s (running %s)', app, args.image, target, running)
-    result = 'failed'
+    # Written right before the switch and cleared once deployed, so a failure
+    # before the switch never marks the commit, and anything after it does.
+    record = {'image': args.image, 'tag': target, 'previous_repository': repository, 'previous_tag': current}
     try:
-        result = deploy(api, app, target, lambda: probe(port), sleep, repository=args.image)
+        result = deploy(api, app, target, lambda: probe(port), sleep, repository=args.image,
+                        before_switch=lambda: _write_record(failed_path, record))
     finally:
-        if result != 'deployed':
-            with open(failed_path, 'w') as handle:
-                json.dump({'image': args.image, 'tag': target,
-                           'previous_repository': repository, 'previous_tag': current}, handle)
         for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
             api.destroy_snapshot(name)
             log.info('%s: pruned snapshot %s', app, name)
+    if result == 'deployed':
+        _clear_record(failed_path)
     log.info('%s: %s %s', app, result, target)
     return 0 if result == 'deployed' else 1
 
