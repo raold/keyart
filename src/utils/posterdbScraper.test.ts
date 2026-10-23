@@ -655,4 +655,70 @@ describe('PosterdbScraper.browseSets', () =>
     await expect(scraper.browseSets('Dune', 2021, 'movie')).rejects.toThrow('Chromium browser is not installed')
     expect(newContext).toHaveBeenCalledTimes(1)
   })
+
+  it('trusts a media page that says it has no posters', async () =>
+  {
+    const empty = '<html><head><title>Dune (2021) | The Poster Database (TPDb)</title></head><body>' +
+      "<p>Unfortunately no posters have been made for this item, or they've all been filtered out.</p></body></html>"
+    const fetchMock = serve({ [SEARCH]: DUNE_SEARCH, [MEDIA]: empty })
+    const scraper = new PosterdbScraper()
+    const browser = fakeBrowser(scraper, () => '')
+
+    const result = await scraper.browseSets('Dune', 2021, 'movie')
+
+    expect(result.sets).toEqual([])
+    expect(requests(fetchMock, MEDIA)).toBe(1)
+    expect(browser).not.toHaveBeenCalled()
+  })
+
+  it('trusts an empty second page', async () =>
+  {
+    const empty = "<html><body>No posters have been made for this item, or they've all been filtered out.</body></html>"
+    serve({
+      [SEARCH]: DUNE_SEARCH,
+      [MEDIA]: mediaPage(singleSets(100, 24)),
+      [MEDIA_PAGE_2]: empty,
+      [profileUrl('alice')]: profilePage(CUSTOM_AVATAR),
+    })
+    const scraper = new PosterdbScraper()
+    const browser = fakeBrowser(scraper, () => '')
+
+    const result = await scraper.browseSets('Dune', 2021, 'movie')
+
+    expect(result.sets).toHaveLength(24)
+    expect(result.capped).toBe(false)
+    expect(browser).not.toHaveBeenCalled()
+  })
+
+  it('still asks the browser when a media page has neither posters nor the notice', async () =>
+  {
+    serve({ [SEARCH]: DUNE_SEARCH, [MEDIA]: '<html><head><title>Just a moment...</title></head><body></body></html>' })
+    const scraper = new PosterdbScraper()
+    const browser = fakeBrowser(scraper, () => '')
+
+    expect((await scraper.browseSets('Dune', 2021, 'movie')).sets).toEqual([])
+    expect(browser).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not wait for a slow profile page', async () =>
+  {
+    const pages = dunePages()
+    const fetchMock = vi.fn(async (url: string) =>
+    {
+      if (url === profileUrl('bob')) return new Promise(() => {})
+      const body = pages[url]
+      return body === undefined ? { ok: false, status: 404, text: async () => '' } : { ok: true, status: 200, text: async () => body }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const scraper = new PosterdbScraper()
+    fakeBrowser(scraper, () => '')
+
+    const started = Date.now()
+    const result = await scraper.browseSets('Dune', 2021, 'movie')
+
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(result.sets.map(s => [s.uploader, s.uploaderAvatar])).toEqual([
+      ['alice', CUSTOM_AVATAR_URL], ['bob', guessedAvatarUrl('bob')], ['alice', CUSTOM_AVATAR_URL],
+    ])
+  })
 })

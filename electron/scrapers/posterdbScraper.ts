@@ -267,6 +267,17 @@ export function isSearchPage($: cheerio.CheerioAPI): boolean {
 }
 
 /**
+ * Tells a media page that has no posters (or none past the last page) from
+ * one that failed to render: the site says so in the page.
+ *
+ * @param $ - Cheerio handle over the page HTML.
+ * @returns true when the page states it has no posters.
+ */
+export function isEmptyMediaPage($: cheerio.CheerioAPI): boolean {
+  return /no posters have been made for this item/i.test($('body').text())
+}
+
+/**
  * Parses the search page's result rows.
  *
  * @param $ - Cheerio handle over the search HTML.
@@ -412,8 +423,24 @@ const AVATAR_TTL = 24 * 60 * 60 * 1000
 /** Parallel profile-page fetches while resolving avatars. */
 const AVATAR_FETCH_CONCURRENCY = 4
 
+/** How long a browse waits for avatars once its sets are ready. */
+const AVATAR_GRACE_MS = 750
+
 /** Resolved avatars by lowercased username; null means "show the generic icon". */
 const avatarCache = new Map<string, { url: string | null; at: number }>()
+
+/**
+ * The avatar to show while a profile lookup is still running: the cached
+ * one, even if stale, else the guessed CDN URL.
+ *
+ * @param username - Uploader name as shown on the site.
+ * @returns The avatar URL, or null for the generic icon.
+ */
+function interimAvatar(username: string): string | null {
+  if (!username || username === 'Unknown') return null
+  const hit = avatarCache.get(username.toLowerCase())
+  return hit ? hit.url : guessedAvatarUrl(username)
+}
 
 /**
  * Where a custom upload would live: the CDN path is built from the username.
@@ -770,17 +797,20 @@ export class PosterdbScraper extends BaseScraper {
    * @param url - Page to load.
    * @param waitFor - Selector that proves the content is there.
    * @param parse - Receives the loaded HTML; may return null to reject the page.
+   * @param isEmpty - Recognises a page that loaded fine and has nothing to show,
+   *   which the browser would render the same way.
    * @returns The parser's result, or null when neither path produced a usable page.
    */
   private async _loadPage<T>(
     url: string,
     waitFor: string,
     parse: ($: cheerio.CheerioAPI) => T | null,
+    isEmpty?: ($: cheerio.CheerioAPI) => boolean,
   ): Promise<T | null> {
     const html = await fetchHtml(url)
     if (html !== null) {
       const $ = cheerio.load(html)
-      if ($(waitFor).length) {
+      if ($(waitFor).length || isEmpty?.($)) {
         const result = parse($)
         if (result !== null) return result
       }
@@ -860,7 +890,7 @@ export class PosterdbScraper extends BaseScraper {
     let lastPageFull = false
     for (let page = 1; page <= MAX_BROWSE_PAGES && !this._aborted; page++) {
       const url = page > 1 ? `${mediaUrl}?page=${page}` : mediaUrl
-      const cards = await this._loadPage(url, 'div.overlay[data-poster-id]', parseCards)
+      const cards = await this._loadPage(url, 'div.overlay[data-poster-id]', parseCards, isEmptyMediaPage)
       if (!cards?.length) {
         lastPageFull = false
         break
@@ -903,11 +933,16 @@ export class PosterdbScraper extends BaseScraper {
       return stubToSummary(stub, posters, parsed.name || stub.card.title, type)
     })
 
-    const avatars = await avatarsP
+    // Profile pages are the site's slowest, so the panel doesn't wait for all of
+    // them: the lookups still running finish into the cache for the next open.
+    const avatars = await Promise.race([
+      avatarsP,
+      new Promise<null>(resolve => setTimeout(() => resolve(null), AVATAR_GRACE_MS)),
+    ])
     const sets = summaries
       .filter((s): s is PosterSetSummary => s !== null && s.posters.length > 0)
       .map(s => {
-        const avatar = avatars.get(s.uploader.toLowerCase())
+        const avatar = avatars ? avatars.get(s.uploader.toLowerCase()) : interimAvatar(s.uploader)
         return avatar ? { ...s, uploaderAvatar: avatar } : s
       })
     Logger.scrape(
