@@ -91,6 +91,11 @@ def snapshots_to_prune(names: list[str], prefix: str, keep: int) -> list[str]:
     return ours[:max(len(ours) - keep, 0)]
 
 
+def images_to_remove(tags: list[str], keep) -> list[str]:
+    """Returns the `sha-` tags in `tags` that are not in `keep`, in order."""
+    return [tag for tag in tags if tag.startswith('sha-') and tag not in keep]
+
+
 def _restore(api, app: str, previous: tuple[str, str]) -> None:
     try:
         api.set_image(app, *previous)
@@ -240,8 +245,13 @@ def _zfs(*args: str) -> str:
     return subprocess.run(['zfs', *args], capture_output=True, text=True, check=True).stdout
 
 
+def _docker(*args: str) -> str:
+    return subprocess.run(['docker', *args], capture_output=True, text=True, check=True).stdout
+
+
 class TrueNASApi:
-    """The app's image through the TrueNAS middleware, and its data dataset through zfs."""
+    """The app's image through the TrueNAS middleware, its data dataset through
+    zfs, and local images through docker."""
 
     def _config(self, app: str) -> dict:
         from truenas_api_client import Client
@@ -295,6 +305,12 @@ class TrueNASApi:
     def destroy_snapshot(self, name: str) -> None:
         _zfs('destroy', '-r', name)
 
+    def image_tags(self, repository: str) -> list[str]:
+        return _docker('image', 'ls', repository, '--format', '{{.Tag}}').splitlines()
+
+    def remove_image(self, repository: str, tag: str) -> None:
+        _docker('image', 'rm', f'{repository}:{tag}')
+
 
 def _read_record(path: str) -> dict:
     try:
@@ -319,6 +335,29 @@ def _clear_record(path: str) -> None:
         os.remove(path)
     except FileNotFoundError:
         pass
+
+
+def _describe(err: Exception) -> str:
+    if isinstance(err, subprocess.CalledProcessError):
+        return command_error(err)
+    return f'{type(err).__name__}: {err}'
+
+
+def _remove_old_images(api, app: str, repository: str, keep: tuple[str, ...]) -> None:
+    """Removes the local `repository:sha-*` images other than `keep`; failures are
+    only warnings."""
+    try:
+        tags = api.image_tags(repository)
+    except Exception as err:
+        log.warning('%s: listing local %s images failed: %s', app, repository, _describe(err))
+        return
+    for tag in images_to_remove(tags, keep):
+        try:
+            api.remove_image(repository, tag)
+        except Exception as err:
+            log.warning('%s: removing image %s:%s failed: %s', app, repository, tag, _describe(err))
+        else:
+            log.info('%s: removed image %s:%s', app, repository, tag)
 
 
 def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
@@ -380,10 +419,13 @@ def run(args: argparse.Namespace, api, probe: Callable[[int], dict | None],
         for name in snapshots_to_prune(api.snapshots(app), SNAPSHOT_PREFIX, args.keep_snapshots):
             api.destroy_snapshot(name)
             log.info('%s: pruned snapshot %s', app, name)
-    if result == 'deployed':
-        _clear_record(failed_path)
     log.info('%s: %s %s', app, result, target)
-    return 0 if result == 'deployed' else 1
+    if result != 'deployed':
+        return 1
+    _clear_record(failed_path)
+    # Keep the new image and the one it replaced (the rollback target).
+    _remove_old_images(api, app, args.image, (target, current))
+    return 0
 
 
 def _positive(value: str) -> int:

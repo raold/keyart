@@ -16,6 +16,12 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 COPY package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm install --no-audit --no-fund
 
+# ----- Production dependencies -------------------------------------------------
+# Built from deps alone, so source edits keep this prune and the runtime's
+# node_modules layer cached; only package*.json changes redo them.
+FROM deps AS prod-deps
+RUN npm prune --omit=dev
+
 # ----- Browser -----------------------------------------------------------------
 # Bundle the Chromium headless shell so the container never downloads it at runtime.
 # Only the fetch script is copied, so source edits keep this large download cached.
@@ -29,8 +35,6 @@ FROM deps AS build
 
 COPY . .
 RUN npm run build:web
-
-RUN npm prune --omit=dev
 
 # ----- Runtime -----------------------------------------------------------------
 FROM node:22-bookworm-slim
@@ -47,7 +51,7 @@ WORKDIR /app
 
 # Largest and most stable layer first.
 COPY --from=browser /build/resources/browsers ./resources/browsers
-COPY --from=build /build/node_modules ./node_modules
+COPY --from=prod-deps /build/node_modules ./node_modules
 COPY --from=build /build/package.json ./package.json
 COPY --from=build /build/server/dist ./server/dist
 COPY --from=build /build/src/dist ./src/dist

@@ -73,6 +73,9 @@ class FakeApi:
         self.fail_port = fail_port
         self.calls = []
         self.snapshot_names = []
+        self.local_tags = []
+        self.fail_remove = set()
+        self.fail_list = None
 
     def get_state(self, app):
         return self.state
@@ -110,6 +113,21 @@ class FakeApi:
         self.calls.append(('destroy_snapshot', name))
         self.snapshot_names.remove(name)
 
+    def image_tags(self, repository):
+        self.calls.append(('image_tags', repository))
+        if self.fail_list:
+            raise self.fail_list
+        return list(self.local_tags)
+
+    def remove_image(self, repository, tag):
+        self.calls.append(('remove_image', repository, tag))
+        if tag in self.fail_remove:
+            raise subprocess.CalledProcessError(
+                1, ['docker', 'image', 'rm', f'{repository}:{tag}'],
+                stderr=f'Error response from daemon: conflict: unable to remove repository reference "{repository}:{tag}" '
+                       '- container 0123abcd is using its referenced image')
+        self.local_tags.remove(tag)
+
 
 class DecideTest(unittest.TestCase):
     def test_decide_waits_without_image(self):
@@ -140,6 +158,15 @@ class PruneTest(unittest.TestCase):
         names = foreign[:1] + ours[:5] + foreign[1:] + ours[5:]
         self.assertEqual(deployer.snapshots_to_prune(names, 'keyart-deploy-', 10), ours[:2])
         self.assertEqual(deployer.snapshots_to_prune(names, 'keyart-deploy-', 12), [])
+
+
+class ImagesTest(unittest.TestCase):
+    def test_images_to_remove_keeps_deployed_and_replaced(self):
+        tags = ['sha-3333333', 'sha-2222222', '1.1', 'latest', 'sha-1111111', 'edge', '<none>', 'sha-0000000']
+        self.assertEqual(deployer.images_to_remove(tags, {'sha-2222222', 'sha-1111111'}),
+                         ['sha-3333333', 'sha-0000000'])
+        self.assertEqual(deployer.images_to_remove(['sha-2222222', '1.0.2'], {'sha-2222222', '1.0.2'}), [])
+        self.assertEqual(deployer.images_to_remove([], {'sha-2222222'}), [])
 
 
 class DeployTest(unittest.TestCase):
@@ -273,6 +300,48 @@ class RunTest(unittest.TestCase):
             api.fail_snapshot = None
             self.assertEqual(run_once(args, api, healthy), 0)
             self.assertEqual(api.tag, 'sha-2222222')
+
+    def test_deployed_removes_older_sha_images(self):
+        api = FakeApi(REPO, 'sha-1111111')
+        api.local_tags = ['sha-3333333', 'sha-2222222', 'sha-1111111', 'sha-0000000', '1.1', 'latest']
+        healthy = {'ok': True, 'commit': NEW_SHA}
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
+        self.assertEqual([call for call in api.calls if call[0] in ('image_tags', 'remove_image')],
+                         [('image_tags', REPO),
+                          ('remove_image', REPO, 'sha-3333333'),
+                          ('remove_image', REPO, 'sha-0000000')])
+        self.assertEqual(api.local_tags, ['sha-2222222', 'sha-1111111', '1.1', 'latest'])
+
+    def test_rolled_back_removes_no_images(self):
+        api = FakeApi(REPO, 'sha-1111111')
+        api.local_tags = ['sha-2222222', 'sha-1111111', 'sha-0000000']
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO'):
+            self.assertEqual(run_once(make_args(tmp, '--go'), api), 1)
+        self.assertFalse(any(call[0] in ('image_tags', 'remove_image') for call in api.calls))
+
+    def test_image_cleanup_failures_are_warnings(self):
+        healthy = {'ok': True, 'commit': NEW_SHA}
+        api = FakeApi(REPO, 'sha-1111111')
+        api.local_tags = ['sha-3333333', 'sha-2222222', 'sha-1111111', 'sha-0000000']
+        api.fail_remove = {'sha-3333333'}
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO') as logs:
+            self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
+        warnings = [record.getMessage() for record in logs.records if record.levelname == 'WARNING']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('is using its referenced image', warnings[0])
+        self.assertEqual(api.local_tags, ['sha-3333333', 'sha-2222222', 'sha-1111111'])
+
+        api = FakeApi(REPO, 'sha-1111111')
+        api.fail_list = subprocess.CalledProcessError(1, ['docker', 'image', 'ls'], stderr='Cannot connect to the Docker daemon')
+        newest, exists = self.patched_lookups()
+        with tempfile.TemporaryDirectory() as tmp, newest, exists, self.assertLogs(deployer.log, 'INFO') as logs:
+            self.assertEqual(run_once(make_args(tmp, '--go'), api, healthy), 0)
+        self.assertTrue(any(record.levelname == 'WARNING' and 'Cannot connect' in record.getMessage()
+                            for record in logs.records))
 
     def test_timeout_option_bounds_the_health_wait(self):
         self.assertEqual(make_args('/state').timeout, 180)
