@@ -10,11 +10,13 @@ import { SchedulerService } from '../electron/services/schedulerService'
 import { PlaywrightService } from '../electron/services/playwrightService'
 import { handlers } from '../electron/handlers'
 import { appEvents } from '../electron/runtime/events'
+import { getUserDataPath } from '../electron/runtime/paths'
 import {
   createSession, destroySession, isValidSession, parseSessionCookie,
   sessionCookieHeader, clearSessionCookie,
 } from './session'
 import { createShutdown } from './shutdown'
+import { buildHealthReport, isDirWritable } from './health'
 import type { FastifyRequest, FastifyReply } from 'fastify'
 
 const PORT = parseInt(process.env.PORT ?? '3939', 10)
@@ -90,7 +92,20 @@ export async function startServer() {
   await app.register(rateLimit, { max: 1000, timeWindow: '1 minute' })
 
   // --- Public routes ---
-  app.get('/api/health', async () => ({ ok: true }))
+  // The deployer and the Docker health check read this: 200 only when the
+  // config directory is writable and the scheduler heartbeat is fresh.
+  app.get('/api/health', async (_req, reply) => {
+    const browserInstalled = await handlers.browser.getStatus().then(status => status.installed, () => false)
+    const report = buildHealthReport({
+      version: handlers.app.getVersion(),
+      commit: process.env.KEYART_COMMIT || 'dev',
+      configWritable: isDirWritable(getUserDataPath()),
+      heartbeatAt: SchedulerService.heartbeatAt(),
+      browserInstalled,
+      now: Date.now(),
+    })
+    return reply.code(report.ok ? 200 : 503).send(report)
+  })
 
   app.get('/api/auth/status', async (req, reply) => {
     const sessionId = parseSessionCookie(req.headers.cookie)

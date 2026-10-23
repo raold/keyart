@@ -47,8 +47,15 @@ ENV PLEX_HELPER_WEB=1 \
     PLEX_BROWSER_BUNDLED_DIR=/app/resources/browsers \
     PORT=3939
 
+# The commit this image was built from, reported by /api/health.
+ARG KEYART_COMMIT=dev
+ENV KEYART_COMMIT=$KEYART_COMMIT
+
 VOLUME /config
 EXPOSE 3939
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3939)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "server/dist/server/index.js"]

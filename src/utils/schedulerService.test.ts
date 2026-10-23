@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { AppConfig, AppliedRecord, MediuxUserSet, PosterInfo, ScheduledJob, ScrapeProgress } from '../../electron/ipc/types'
@@ -509,6 +510,35 @@ describe('SchedulerService.shutdown', () =>
     finally
     {
       vi.useRealTimers()
+    }
+  })
+})
+
+describe('SchedulerService.heartbeatAt', () =>
+{
+  it('only records heartbeat writes that succeeded', () =>
+  {
+    const dir = path.join(os.tmpdir(), 'pps-scheduler-test-no-engine')
+    fs.rmSync(dir, { recursive: true, force: true })
+    const before = SchedulerService.heartbeatAt()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try
+    {
+      SchedulerService.startEngineHeartbeat()
+      expect(SchedulerService.heartbeatAt()).toBe(before)
+
+      fs.mkdirSync(dir, { recursive: true })
+      vi.advanceTimersByTime(30_000)
+
+      const at = SchedulerService.heartbeatAt()
+      expect(at).not.toBe(before)
+      expect(Math.abs(Date.now() - Date.parse(at!))).toBeLessThan(5_000)
+    }
+    finally
+    {
+      SchedulerService.shutdown()
+      vi.useRealTimers()
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 })
