@@ -3,11 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
-# Least privilege: jobs only read the repo. The badge-refresh step authenticates
-# with its own GH_TOKEN secret, not the default token.
+# A newer run for the same ref supersedes the one in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: jobs only read the repo. The image job raises its own.
 permissions:
   contents: read
 
@@ -59,3 +64,64 @@ jobs:
 
       - name: Build main process
         run: npx tsc -p tsconfig.electron.json
+
+  # Publishes ghcr.io/<owner>/keyart for every push that passes CI: sha-<7>
+  # (what the server deploys), edge on main, and X.Y + latest on a vX.Y tag,
+  # which also gets a GitHub Release. Pull requests never publish.
+  image:
+    name: Publish image
+    needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # Build from a checkout of this exact commit (the action's default Git
+      # context follows the branch tip, which can move under a queued run).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # The match tag below would add `latest` on its own; the explicit
+          # raw tag is the single source, so it isn't listed twice.
+          flavor: latest=false
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=match,pattern=v(\d+\.\d+),group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          build-args: KEYART_COMMIT=${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
