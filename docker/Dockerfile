@@ -6,23 +6,29 @@
 #
 #   docker build -f docker/Dockerfile -t keyart .
 
-# ----- Build stage -------------------------------------------------------------
-FROM node:22-bookworm AS build
+# ----- Dependencies ------------------------------------------------------------
+# Only package*.json feeds this stage, so source edits never reinstall.
+FROM node:22-bookworm AS deps
 WORKDIR /build
-
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && rm -rf /var/lib/apt/lists/*
 
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 
 COPY package*.json ./
-RUN npm install --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm npm install --no-audit --no-fund
+
+# ----- Browser -----------------------------------------------------------------
+# Bundle the Chromium headless shell so the container never downloads it at runtime.
+# Only the fetch script is copied, so source edits keep this large download cached.
+FROM deps AS browser
+
+COPY scripts/fetch-browser.mjs scripts/fetch-browser.mjs
+RUN npm run prepare:browser
+
+# ----- Build stage -------------------------------------------------------------
+FROM deps AS build
 
 COPY . .
 RUN npm run build:web
-
-# Bundle the Chromium headless shell so the container never downloads it at runtime.
-RUN npm run prepare:browser
 
 RUN npm prune --omit=dev
 
@@ -33,12 +39,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-      libgbm1 libpango-1.0-0 libcairo2 libasound2 libgtk-3-0 libxshmfence1 \
-      libsecret-1-0 fonts-liberation \
+      libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
+      fonts-liberation \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /build /app
 WORKDIR /app
+
+# Largest and most stable layer first.
+COPY --from=browser /build/resources/browsers ./resources/browsers
+COPY --from=build /build/node_modules ./node_modules
+COPY --from=build /build/package.json ./package.json
+COPY --from=build /build/server/dist ./server/dist
+COPY --from=build /build/src/dist ./src/dist
 
 ENV PLEX_HELPER_WEB=1 \
     PLEX_HELPER_PROD=1 \
