@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { AppConfig, AppliedRecord, MediuxUserSet, PosterInfo, ScheduledJob, ScrapeProgress } from '../../electron/ipc/types'
@@ -481,6 +482,63 @@ describe('SchedulerService.init', () =>
     finally
     {
       vi.useRealTimers()
+    }
+  })
+})
+
+describe('SchedulerService.shutdown', () =>
+{
+  it('stops every cron task and clears the watch and heartbeat timers', async () =>
+  {
+    const { default: cron } = await import('node-cron')
+    SchedulerService.shutdown()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try
+    {
+      state.config.scheduledJobs = [job(), job({ id: 'job-2' })]
+      SchedulerService.init(null)
+      SchedulerService.startEngineHeartbeat()
+      const stops = vi.mocked(cron.schedule).mock.results.map(r => (r.value as { stop: ReturnType<typeof vi.fn> }).stop)
+      expect(stops).toHaveLength(2)
+      expect(vi.getTimerCount()).toBe(2)
+
+      SchedulerService.shutdown()
+
+      for (const stop of stops) expect(stop).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    finally
+    {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('SchedulerService.heartbeatAt', () =>
+{
+  it('only records heartbeat writes that succeeded', () =>
+  {
+    const dir = path.join(os.tmpdir(), 'pps-scheduler-test-no-engine')
+    fs.rmSync(dir, { recursive: true, force: true })
+    const before = SchedulerService.heartbeatAt()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try
+    {
+      SchedulerService.startEngineHeartbeat()
+      expect(SchedulerService.heartbeatAt()).toBe(before)
+
+      fs.mkdirSync(dir, { recursive: true })
+      vi.advanceTimersByTime(30_000)
+
+      const at = SchedulerService.heartbeatAt()
+      expect(at).not.toBe(before)
+      expect(Math.abs(Date.now() - Date.parse(at!))).toBeLessThan(5_000)
+    }
+    finally
+    {
+      SchedulerService.shutdown()
+      vi.useRealTimers()
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 })

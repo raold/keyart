@@ -37,6 +37,7 @@ let lastProgressEmit = 0
 let _win: BrowserWindow | null = null
 let _isEngine = false
 let _engineTimer: NodeJS.Timeout | null = null
+let _heartbeatAt: string | null = null
 let _watchTimer: NodeJS.Timeout | null = null
 let _activeSignature = ''
 let _lastSnapshot = ''
@@ -236,7 +237,9 @@ export const SchedulerService = {
     _isEngine = true
     const write = () => {
       try {
-        fs.writeFileSync(enginePath(), JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString() }))
+        const updatedAt = new Date().toISOString()
+        fs.writeFileSync(enginePath(), JSON.stringify({ pid: process.pid, updatedAt }))
+        _heartbeatAt = updatedAt
       } catch (err) {
         Logger.warn('Scheduler', `Could not write engine heartbeat: ${errorText(err)}`)
       }
@@ -244,16 +247,27 @@ export const SchedulerService = {
     write()
     _engineTimer = setInterval(write, ENGINE_WRITE_MS)
 
-    if (isWebMode()) {
-      process.once('SIGTERM', cleanupEngine)
-      process.once('SIGINT', cleanupEngine)
-    } else {
+    // In web mode the server owns SIGTERM and SIGINT and calls shutdown().
+    if (!isWebMode()) {
       const { app } = require('electron') as typeof import('electron')
       app.once('will-quit', cleanupEngine)
       process.once('SIGTERM', () => { cleanupEngine(); app.quit() })
       process.once('SIGINT',  () => { cleanupEngine(); app.quit() })
     }
     Logger.info('Scheduler', 'Running as the 24/7 engine - GUI instances on this config will defer to it')
+  },
+
+  /** ISO time of the last successful engine heartbeat write in this process, or null if there has been none. */
+  heartbeatAt(): string | null {
+    return _heartbeatAt
+  },
+
+  /** Stops every cron task and timer and removes the engine heartbeat, so the process can exit. */
+  shutdown(): void {
+    for (const t of tasks.values()) t.stop()
+    tasks.clear()
+    if (_watchTimer) { clearInterval(_watchTimer); _watchTimer = null }
+    cleanupEngine()
   },
 
   engineStatus(): SchedulerEngineStatus {
