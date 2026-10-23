@@ -24,7 +24,7 @@ const DEFAULTS: AppConfig = {
   clientIdentifier: '',
   logDrawerHeight: 300,
   libraryPanelWidth: 560,
-  libraryPanelGallery: false,
+  libraryPanelGallery: true,
   plexServerName: '',
   scheduledJobs: [],
   tmdbApiKey: '',
