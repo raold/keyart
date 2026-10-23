@@ -345,6 +345,13 @@ describe('classifySetPosters', () =>
     expect(classifySetPosters(seasons, 'Breaking Bad', 2008, 'show').map(p => p.isCollectionMember)).toEqual([undefined, undefined, undefined, undefined])
     expect(classifySetPosters([poster('Better Call Saul', 2015)], 'Breaking Bad', 2008, 'show')[0].isCollectionMember).toBe(true)
   })
+
+  it('matches a Plex title that carries its year in parentheses', () =>
+  {
+    const seasons = [poster('East of Eden', 2026, { season: 'Cover' }), poster('East of Eden', 2026, { season: 1 })]
+    expect(classifySetPosters(seasons, 'East of Eden (2026)', 2026, 'show').map(p => p.isCollectionMember)).toEqual([undefined, undefined])
+    expect(classifySetPosters([poster('East of Eden', 1981)], 'East of Eden (2026)', 2026, 'show')[0].isCollectionMember).toBe(true)
+  })
 })
 
 describe('set summaries', () =>

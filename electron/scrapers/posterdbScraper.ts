@@ -405,11 +405,13 @@ export function classifySetPosters(
   year: number | undefined,
   type: PosterdbMediaType,
 ): PosterInfo[] {
-  const want = normalizeTitle(title)
+  // The same forms the search matched on, so "East of Eden (2026)" in Plex is
+  // "East of Eden" on the site.
+  const wants = titleAliases(title, type)
   return posters.map(p => {
     // cardsToPosters already flags collection art from the card's media type.
     if (p.isCollection) return p
-    const sameTitle = normalizeTitle(p.title) === want
+    const sameTitle = wants.includes(normalizeTitle(p.title))
       && (p.year == null || year == null || Math.abs(p.year - year) <= 1)
     // Browsing a Plex Collection: every movie poster in the set is a member.
     // Browsing a title: anything that isn't this title belongs to a sibling.
