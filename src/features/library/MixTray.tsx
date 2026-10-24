@@ -71,7 +71,7 @@ export default function MixTray({ slots, note, apply, disabled, onApply, onClear
 
       <div className={styles.mixHead}>
         <h3 className={styles.mixTitle}>Your mix</h3>
-        {!applying && !slots.some(s => s.change) && (
+        {!applying && !apply?.error && !slots.some(s => s.change) && (
           <span className={styles.mixSummary}>Your picks are already on the show</span>
         )}
         <div className={styles.mixActions}>

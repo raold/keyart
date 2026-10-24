@@ -4,7 +4,7 @@ import os from 'os'
 import path from 'path'
 import type { AppConfig, AppliedRecord, MediuxUserSet, PosterInfo, ScheduledJob, ScrapeProgress } from '../../electron/ipc/types'
 
-const state = vi.hoisted(() => ({ config: {} as Partial<AppConfig> }))
+const state = vi.hoisted(() => ({ config: {} as Partial<AppConfig>, revision: 0 }))
 
 vi.mock('node-cron', async (importOriginal) =>
 {
@@ -15,7 +15,8 @@ vi.mock('node-cron', async (importOriginal) =>
 vi.mock('../../electron/services/config', () => ({
   ConfigService: {
     get: () => structuredClone(state.config),
-    set: (patch: Partial<AppConfig>) => { state.config = { ...state.config, ...structuredClone(patch) } },
+    set: (patch: Partial<AppConfig>) => { state.config = { ...state.config, ...structuredClone(patch) }; state.revision++ },
+    revision: () => String(state.revision),
   },
 }))
 
@@ -72,6 +73,13 @@ function job(overrides: Partial<ScheduledJob> = {}): ScheduledJob
 function applied(itemKey: string, posterUrls: string[], extra: Partial<AppliedRecord> = {}): AppliedRecord
 {
   return { itemKey, title: 'Show', type: 'show', source: 'mediux', posterUrls, appliedAt: '2026-10-01T00:00:00.000Z', ...extra }
+}
+
+/** Stands in for the user applying art by hand in another window: history changes under a running job. */
+function handApplied(...records: AppliedRecord[]): void
+{
+  state.config.appliedPosters = [...records, ...(state.config.appliedPosters ?? [])]
+  state.revision++
 }
 
 function userSet(id: string, title: string, posters: PosterInfo[], extra: Partial<MediuxUserSet> = {}): MediuxUserSet
@@ -308,6 +316,61 @@ describe('SchedulerService._execute', () =>
     const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
     expect(byId('100')?.groups).toEqual(['poster'])
     expect(byId('200')?.groups).toEqual(['backdrop'])
+  })
+
+  it('leaves a group the user claims by hand while the job runs', async () =>
+  {
+    state.config.scheduledJobs = [job()]
+    scrapeReturns({ [SET_URL]: [poster('main'), poster('e1', { season: 1, episode: 1 }), poster('e2', { season: 1, episode: 2 })] })
+    vi.mocked(PlexService.uploadPoster).mockImplementation(async (req) =>
+    {
+      if (req.imageUrl === 'main') handApplied(applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'], groups: ['cards'], appliedAt: '2026-10-24T00:00:00.000Z' }))
+      return { success: true }
+    })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['main'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 1, covered: 2, status: 'success' })
+    expect(storedJob().history![0].details!.covered).toEqual(['Show (2020) · 2 posters'])
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('100')).toMatchObject({ posterUrls: ['main'], slots: ['poster'], groups: ['poster'] })
+    expect(byId('7')).toMatchObject({ groups: ['cards'] })
+  })
+
+  it('does not take back a group the user claimed during the upload that was already under way', async () =>
+  {
+    state.config.scheduledJobs = [job()]
+    scrapeReturns({ [SET_URL]: [poster('main'), poster('e1', { season: 1, episode: 1 })] })
+    vi.mocked(PlexService.uploadPoster).mockImplementation(async (req) =>
+    {
+      if (req.imageUrl === 'e1') handApplied(applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'], groups: ['cards'], appliedAt: '2026-10-24T00:00:00.000Z' }))
+      return { success: true }
+    })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    expect(PlexService.uploadPoster).toHaveBeenCalledTimes(2)
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('100')).toMatchObject({ posterUrls: ['main', 'e1'], slots: ['poster'], groups: ['poster'] })
+    expect(byId('7')).toMatchObject({ groups: ['cards'] })
+  })
+
+  it('keeps a record that lost every group, so its posters still count as applied', async () =>
+  {
+    state.config.scheduledJobs = [job()]
+    scrapeReturns({ [SET_URL]: [poster('e1', { season: 1, episode: 1 })] })
+    vi.mocked(PlexService.uploadPoster).mockImplementation(async () =>
+    {
+      handApplied(applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'], groups: ['cards'], appliedAt: '2026-10-24T00:00:00.000Z' }))
+      return { success: true }
+    })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('100')).toMatchObject({ posterUrls: ['e1'], slots: [], groups: [] })
+    expect(byId('7')).toMatchObject({ groups: ['cards'] })
   })
 
   it('is partial when an upload fails, without counting seasons Plex does not have', async () =>

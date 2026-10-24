@@ -1293,6 +1293,8 @@ function SetsPanel({ item, onClose, onItemPoster }: {
   const memberKey = (p: PosterInfo) => p.tmdbId ?? `${p.title.toLowerCase()}|${p.year ?? ''}`
 
   async function applySet(s: PosterSetSummary) {
+    // Retry stays clickable on a card that failed earlier; it must not write the show while Apply mix does.
+    if (mixRunning) return
     // Every per-set map is keyed by source, never by the raw id (see setKey).
     const sKey = setKey(s)
     const memberIds = [...new Set(s.posters.filter(p => p.isCollectionMember).map(p => p.tmdbId ?? `${p.title.toLowerCase()}|${p.year ?? ''}`))]
@@ -1873,7 +1875,10 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           const sKey = setKey(s)
           // "Applied" = the set currently live on this item; "Downloaded" = a set
           // applied before but since overwritten; "Has art" = title has art elsewhere.
-          const isCurrent = appliedIdx.currentByItem.get(item.key) === sKey
+          // A show can be a mix, so any set that fills one of its groups is live.
+          const isCurrent = isShow && owners && ART_GROUPS.some(g => owners[g])
+            ? ART_GROUPS.some(g => owners[g]?.setKey === sKey)
+            : appliedIdx.currentByItem.get(item.key) === sKey
           const badge = isCurrent
             ? <span className={styles.matchBadge}><CheckCircle2 size={11} /> Applied</span>
             : appliedIdx.setKeys.has(sKey)
@@ -1907,6 +1912,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
               onApply={() => applySet(s)}
               checkingLibrary={!setScopeReady(s.posters, checkedSets === sets)}
               enabledTypes={types}
+              disabled={mixRunning}
               creator={creatorOf(s)}
               onCreatorChange={state => {
                 // Hiding the creator the dropdown is narrowed to would leave
@@ -2387,6 +2393,7 @@ function FileTile({ poster, set, st, done, error, onLightbox, onApply }: {
   const [loaded, setLoaded] = useState(false)
 
   function shortError(e: string): string {
+    if (/skipped: not in your library/.test(e)) return 'Not in library'
     if (/not connected/i.test(e)) return 'Not connected'
     if (/403/.test(e))            return 'Auth error (403)'
     if (/404/.test(e))            return 'Not found (404)'

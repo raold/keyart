@@ -40,6 +40,7 @@ import {
   slotGroup,
   urlKey,
   withNextRun,
+  yieldToOwners,
   type ArtGroup,
   type ScheduleForm,
 } from '../../electron/services/scheduleUtils'
@@ -713,6 +714,18 @@ describe('art ownership', () =>
     expect(ownedByOther(owners, '10', 's1e1', 'mediux:A')).toBe(false)
     expect(ownedByOther(owners, '10', 'poster', 'mediux:B')).toBe(false)
     expect(ownedByOther(owners, '11', 's1e1', 'mediux:B')).toBe(false)
+  })
+
+  it('strips the slots another set owns from a run\'s records, keeping their posters', () =>
+  {
+    const owners = artOwners([rec({ setId: 'B', slots: ['s1e1'], groups: ['cards'] })])
+    const run = rec({ setId: 'A', posterUrls: ['main', 'e1'], slots: ['poster', 's1e1'] })
+    const [stripped] = yieldToOwners([run], owners)
+    expect(stripped).toMatchObject({ posterUrls: ['main', 'e1'], slots: ['poster'] })
+    expect(run.slots).toEqual(['poster', 's1e1'])
+    expect(yieldToOwners([rec({ itemKey: '11', setId: 'A', slots: ['s1e1'] })], owners)[0].slots).toEqual(['s1e1'])
+    expect(yieldToOwners([rec({ setId: 'B', slots: ['s1e1'] })], owners)[0].slots).toEqual(['s1e1'])
+    expect(yieldToOwners([rec({ source: 'posterdb', setId: 'B', slots: ['s1e1'] })], owners)[0].slots).toEqual([])
   })
 })
 

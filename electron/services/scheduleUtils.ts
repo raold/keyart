@@ -1261,6 +1261,24 @@ export function ownedByOther(owners: Map<string, Partial<Record<ArtGroup, ArtOwn
 }
 
 /**
+ * Strips from a run's records the slots whose art group another set owns right now, so
+ * merging them cannot hand that group back. A record left with no slots keeps its
+ * posters and still merges, but claims no group.
+ *
+ * @param records - The records a run built.
+ * @param owners - Item key to group owners as of now, from {@link artOwners}.
+ * @returns The records with the contested slots removed; the originals are not changed.
+ */
+export function yieldToOwners(records: AppliedRecord[], owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>): AppliedRecord[]
+{
+  return records.map(rec =>
+  {
+    const key = recordCoverageKey(rec)
+    return { ...rec, slots: (rec.slots ?? []).filter(slot => !ownedByOther(owners, rec.itemKey, slot, key)) }
+  })
+}
+
+/**
  * Records that a set now owns a group, so later posters in the same run see it.
  *
  * @param owners - Item key to group owners, from {@link artOwners}.

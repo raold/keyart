@@ -361,7 +361,7 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
 
           <Switch
             label="Only apply new artwork"
-            description="Skips posters already applied to an item, so each run only adds new uploads and Plex doesn't pile up duplicate copies. Turn off to re-apply the full set every run."
+            description="Skips posters already applied to an item, so each run only adds new uploads and Plex doesn't pile up duplicate copies. Turn off to re-apply this job's own art every run. Art that another set holds on a show (poster, seasons, title cards or backdrop) is always left alone."
             checked={skipApplied}
             onChange={setSkipApplied}
           />
@@ -491,7 +491,7 @@ function JobCard({ job, now, starting, canMoveUp, canMoveDown, onEdit, onDelete,
               {job.lastRun && (
                 <><span className={styles.dot} /><span title={new Date(job.lastRun).toLocaleString()}>last ran {relativeTime(job.lastRun, now)}</span></>
               )}
-              {job.skipApplied === false && <><span className={styles.dot} /><span>re-applies everything</span></>}
+              {job.skipApplied === false && <><span className={styles.dot} /><span>re-applies its art</span></>}
             </div>
             {isRunning && job.progress && (
               <span className={styles.cardProgress} title={job.progress.current}>{describeProgress(job.progress)}</span>

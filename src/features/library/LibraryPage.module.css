@@ -1344,7 +1344,7 @@
 .groupChip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 .groupChip:disabled { opacity: 0.5; cursor: default; }
 .groupChipOwned { color: var(--color-text-primary); }
-.groupChipCheck { flex-shrink: 0; color: var(--color-success, #3fb950); }
+.groupChipCheck { flex-shrink: 0; color: var(--color-accent-success); }
 
 .groupChipPicked,
 .groupChipPicked:hover:not(:disabled) {

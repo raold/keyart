@@ -134,6 +134,20 @@ export const ConfigService = {
     return config
   },
 
+  /**
+   * Tells whether config.json was written since the last look, without reading it.
+   *
+   * @returns A stamp of the file that changes whenever it is rewritten, by this or another process; empty when it can't be read.
+   */
+  revision(): string {
+    try {
+      const { mtimeMs, size } = fs.statSync(jsonConfigPath())
+      return `${mtimeMs}:${size}`
+    } catch {
+      return ''
+    }
+  },
+
   set(partial: Partial<AppConfig>) {
     const updates = { ...partial }
     if (updates.token !== undefined) {

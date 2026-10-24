@@ -15,7 +15,7 @@ import { isWebMode } from '../runtime/runtime'
 import {
   appliedUrlIndex, artOwners, claimGroup, coverageKey, creatorOfUrl, describeRun, emptyTally, failedRun, finishRun,
   mergeAppliedRecords, normalizeJob, ownedByOther, posterKind, posterSlot, previewCron, recordRun, recoverInterrupted, setRefOfUrl,
-  reorderJobs, slotGroup, titleLabel, withNextRun, type ArtGroup, type ArtOwner, type RunTally,
+  reorderJobs, slotGroup, titleLabel, withNextRun, yieldToOwners, type ArtGroup, type ArtOwner, type RunTally,
 } from './scheduleUtils'
 
 const ENGINE_FILE     = 'scheduler-engine.json'
@@ -68,11 +68,27 @@ interface RunContext {
   applied: Map<string, Set<string>> | null
   /** Item key to the set that owns each of its art groups; updated as the run fills them. */
   owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>
+  /** Owners as saved history has them now, tagged with the config revision they were read at; null until first needed. */
+  live: { revision: string; owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>> } | null
   /** MediUX file types the user has enabled. */
   filters: Set<string>
   lookups: Map<string, Promise<ResolvedItem | null>>
   records: Map<string, AppliedRecord>
   mainThumb: Set<string>
+}
+
+/**
+ * Who owns each item's art in saved history right now, as opposed to when the run started: the
+ * user can apply art by hand while a job runs. The history is parsed again only when the config
+ * file was rewritten since the last look; a stat per upload is all an unchanged run pays.
+ */
+function liveOwners(ctx: RunContext): Map<string, Partial<Record<ArtGroup, ArtOwner>>> {
+  // The revision is read first so a write landing in between is caught on the next call.
+  const revision = ConfigService.revision()
+  if (!ctx.live || !revision || ctx.live.revision !== revision) {
+    ctx.live = { revision, owners: artOwners(ConfigService.get().appliedPosters ?? []) }
+  }
+  return ctx.live.owners
 }
 
 /** Adds live queue and progress state to stored jobs for display. */
@@ -450,7 +466,7 @@ export const SchedulerService = {
         return
       }
       const slot = posterSlot(poster)
-      if (ownedByOther(ctx.owners, target.key, slot, source.setKey)) {
+      if (ownedByOther(ctx.owners, target.key, slot, source.setKey) || ownedByOther(liveOwners(ctx), target.key, slot, source.setKey)) {
         tally.covered++
         tally.coveredTitles.set(targetLabel, (tally.coveredTitles.get(targetLabel) ?? 0) + 1)
         return
@@ -586,6 +602,7 @@ export const SchedulerService = {
         tally: emptyTally(job.urls.length),
         applied: job.skipApplied === false ? null : appliedUrlIndex(history),
         owners: artOwners(history),
+        live: null,
         filters: new Set(cfg.mediuxFilters ?? ['poster', 'backdrop', 'title_card']),
         lookups: new Map(),
         records: new Map(),
@@ -606,8 +623,10 @@ export const SchedulerService = {
 
       ctx.tally.unmatched = ctx.tally.unmatchedTitles.size
       if (ctx.records.size) {
+        // The user may have applied art by hand since the run began; a group someone else holds now stays theirs.
         const existing = ConfigService.get().appliedPosters ?? []
-        ConfigService.set({ appliedPosters: mergeAppliedRecords(existing, [...ctx.records.values()]) })
+        const records = yieldToOwners([...ctx.records.values()], artOwners(existing))
+        ConfigService.set({ appliedPosters: mergeAppliedRecords(existing, records) })
       }
 
       const run = finishRun(ctx.tally, startedAt, new Date(), trigger)
