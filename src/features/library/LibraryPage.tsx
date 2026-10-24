@@ -15,7 +15,7 @@ import { useCreatorPrefs, parseCreatorInput, type CreatorState } from '../../uti
 import { arrangeSets, uploaderValue } from '../../utils/librarySets'
 import { recordApplied, recordAppliedBatch, recordAppliedQuietly, appliedKey, loadAppliedIndex, type AppliedIndex } from '../../utils/appliedTracker'
 import { applyError, applyPosters, type ApplyState } from '../../utils/applyPosters'
-import { GROUP_LABEL, keptSeasonsNote, missingSeasons, planMix, postersInGroup, setCompleteness, setGroups, type ArtMix } from '../../utils/artMix'
+import { GROUP_LABEL, describeCompleteness, keptSeasonsNote, missingSeasons, planMix, postersInGroup, setCompleteness, setGroups, sortByCompleteness, type ArtMix, type Completeness, type LibrarySeason } from '../../utils/artMix'
 import { uuid } from '../../utils/uuid'
 import { errorMessage } from '../../utils/errorMessage'
 import {
@@ -895,6 +895,8 @@ function SetsPanel({ item, onClose, onItemPoster }: {
   const [tmdbMissing, setTmdbMissing] = useState(false)
   const [uploader, setUploader] = useState<string>('all')
   const [source, setSource]     = useState<SetSource | 'all'>('all')
+  // A show's sets in the order they came, or the ones covering most of its library first.
+  const [order, setOrder]       = useState<'default' | 'complete'>('default')
   // Reveals hidden creators' sets for this title, until the next title.
   const [showHidden, setShowHidden] = useState(false)
   const { stateOf, setState: setCreatorState } = useCreatorPrefs()
@@ -952,6 +954,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
   useEffect(() => {
     setUploader('all')
     setSource('all')
+    setOrder('default')
     setShowHidden(false)
     setApplyMap({})
     setCollectionScope({})
@@ -1502,6 +1505,23 @@ function SetsPanel({ item, onClose, onItemPoster }: {
     if (isShow) for (const s of sets) map.set(setKey(s), setGroups(s.posters))
     return map
   }, [sets, isShow])
+  // The seasons Plex has for the show, with the episodes in each.
+  const librarySeasons = useMemo(
+    () => artSlots.flatMap<LibrarySeason>(a => a.kind === 'season' && typeof a.season === 'number' ? [{ season: a.season, episodes: a.episodes }] : []),
+    [artSlots],
+  )
+  // How much of that each set covers; null when Plex has no season to measure against.
+  const completenessBySet = useMemo(() => {
+    const map = new Map<string, Completeness | null>()
+    if (isShow) for (const s of sets) map.set(setKey(s), setCompleteness(s.posters, librarySeasons))
+    return map
+  }, [sets, isShow, librarySeasons])
+  const shownSets = useMemo(
+    () => isShow && order === 'complete'
+      ? sortByCompleteness(visibleSets, s => completenessBySet.get(setKey(s)) ?? null)
+      : visibleSets,
+    [isShow, order, visibleSets, completenessBySet],
+  )
   const mixing = isShow && ART_GROUPS.some(g => mix[g])
   const mixRunning = mixApply?.status === 'applying'
   const anyApplying = mixRunning || Object.values(applyMap).some(a => a.status === 'applying')
@@ -1542,10 +1562,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
 
   // Seasons in Plex that the picked seasons set has no poster for keep what they have.
   const seasonsPick = findSet(mix.seasons)
-  const seasonsCompleteness = seasonsPick && setCompleteness(
-    seasonsPick.posters,
-    artSlots.flatMap(a => a.kind === 'season' && typeof a.season === 'number' ? [{ season: a.season }] : []),
-  )
+  const seasonsCompleteness = seasonsPick && setCompleteness(seasonsPick.posters, librarySeasons)
   const mixNote = seasonsCompleteness ? keptSeasonsNote(missingSeasons(seasonsCompleteness)) : undefined
 
   // The title cards' set only adds cards for new episodes while a job syncs it.
@@ -1698,6 +1715,25 @@ function SetsPanel({ item, onClose, onItemPoster }: {
               ...uploaders.map(u => ({ value: u.value, label: u.label })),
             ]}
           />
+          {isShow && (
+            <div className={styles.orderToggles} role="group" aria-label="Order">
+              <button
+                className={`${styles.orderToggle} ${order === 'default' ? styles.orderToggleOn : ''}`}
+                onClick={() => setOrder('default')}
+                aria-pressed={order === 'default'}
+              >
+                Default order
+              </button>
+              <button
+                className={`${styles.orderToggle} ${order === 'complete' ? styles.orderToggleOn : ''}`}
+                onClick={() => setOrder('complete')}
+                aria-pressed={order === 'complete'}
+                title="Sets that cover the most of your seasons and episodes first"
+              >
+                Most complete
+              </button>
+            </div>
+          )}
           <div className={styles.typeToggles}>
             {ALL_TYPES.map(t => (
               <button
@@ -1833,7 +1869,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           <div className={styles.panelNotice}><ImageIcon size={20} /><p>No sets match the current filters.</p></div>
         )}
 
-        {visibleSets.map(s => {
+        {shownSets.map(s => {
           const sKey = setKey(s)
           // "Applied" = the set currently live on this item; "Downloaded" = a set
           // applied before but since overwritten; "Has art" = title has art elsewhere.
@@ -1862,6 +1898,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           const showScope = hasCollectionArt || collectionInLib > 1
             || (isCollectionItem && memberIds.some(k => memberInLib.get(k)))
           const scheduledBy = coveringJob(coverage, s.id, s.uploader, s.source)
+          const completeness = completenessBySet.get(sKey)
           return (
             <SetCard
               key={sKey}
@@ -1899,6 +1936,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
                 }))
                 setApplyMap(m => { const next = { ...m }; delete next[sKey]; return next })
               } : undefined}
+              completeness={completeness ? describeCompleteness(completeness) : undefined}
               groupChips={isShow
                 ? (groupsBySet.get(sKey) ?? []).map(group => ({ group, picked: mix[group] === sKey, owned: owners?.[group]?.setKey === sKey }))
                 : undefined}
@@ -1963,7 +2001,7 @@ function ThumbButton({ url, label, episode, onClick }: { url: string; label: str
 }
 
 /** Expandable card for one poster set: preview, uploader, source, counts, apply state, and grouped posters. */
-function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, badge, disabled, creator = 'none', onCreatorChange, showSource, large, selectable, checked, onToggleSelect, onSchedule, scheduledBy, onOpenSchedule, scheduleHint, scheduleError, scheduling, collectionMovies, collectionTotal, hasCollectionArt, applyScope, scopeContext, onApplyScopeChange, groupChips, onPickGroup }: {
+function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, badge, disabled, creator = 'none', onCreatorChange, showSource, large, selectable, checked, onToggleSelect, onSchedule, scheduledBy, onOpenSchedule, scheduleHint, scheduleError, scheduling, collectionMovies, collectionTotal, hasCollectionArt, applyScope, scopeContext, onApplyScopeChange, completeness, groupChips, onPickGroup }: {
   set: PosterSetSummary
   apply?: ApplyState
   onApply: () => void
@@ -2011,6 +2049,8 @@ function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, ba
   /** Whether scope labels refer to a Plex Collection or a single movie. */
   scopeContext?: 'movie' | 'collection'
   onApplyScopeChange?: (patch: Partial<SetApplyScope>) => void
+  /** For a show's set: how much of the show's library it covers, as two short lines (see describeCompleteness). */
+  completeness?: { seasons: string; cards: string }
   /** A show's art groups this set has: whether each is picked for the mix and whether this set fills it on the show now. */
   groupChips?: { group: ArtGroup; picked: boolean; owned: boolean }[]
   /** Picks this set for a group in the mix, or drops the pick; omit to lock the chips. */
@@ -2143,6 +2183,13 @@ function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, ba
             {enabledTypes.has('title_card') && set.titleCardCount > 0 && <span className={styles.countBadge}>{set.titleCardCount} card{set.titleCardCount !== 1 ? 's' : ''}</span>}
             {enabledTypes.has('backdrop')   && set.backdropCount > 0  && <span className={styles.countBadge}>{set.backdropCount} backdrop{set.backdropCount !== 1 ? 's' : ''}</span>}
           </div>
+
+          {completeness && (
+            <div className={styles.setCompleteness}>
+              <div>{completeness.seasons}</div>
+              <div>{completeness.cards}</div>
+            </div>
+          )}
 
           {groupChips && groupChips.length > 0 && (
             <div className={styles.groupChips} role="group" aria-label="Pick for your mix">

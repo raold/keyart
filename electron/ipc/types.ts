@@ -702,6 +702,8 @@ export interface PlexArtSlot {
   thumb?: string
   kind: 'collection' | 'movie' | 'show' | 'season'
   season?: number
+  /** episodes Plex has in this season */
+  episodes?: number
   /** True when this slot is the item the user selected */
   highlight?: boolean
 }

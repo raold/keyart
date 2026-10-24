@@ -164,6 +164,27 @@ export function completenessScore(c: Completeness): number {
 }
 
 /**
+ * Orders sets for the "Most complete" sort: highest {@link completenessScore}
+ * first, sets with no completeness last, ties and unscored sets in the order given.
+ *
+ * @param items - The sets, in their current order. Not modified.
+ * @param completenessOf - Looks up a set's {@link setCompleteness}.
+ * @returns A new array.
+ */
+export function sortByCompleteness<T>(items: T[], completenessOf: (item: T) => Completeness | null): T[] {
+  return items
+    .map(item => {
+      const c = completenessOf(item)
+      return { item, score: c ? completenessScore(c) : null }
+    })
+    .sort((a, b) => {
+      if (a.score === null || b.score === null) return (a.score === null ? 1 : 0) - (b.score === null ? 1 : 0)
+      return b.score - a.score
+    })
+    .map(entry => entry.item)
+}
+
+/**
  * Names the library seasons a set has no poster for.
  *
  * @param c - The set's {@link setCompleteness}.

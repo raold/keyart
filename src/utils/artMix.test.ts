@@ -10,6 +10,7 @@ import {
   postersInGroup,
   setCompleteness,
   setGroups,
+  sortByCompleteness,
   type Completeness,
   type LibrarySeason,
 } from './artMix'
@@ -473,6 +474,53 @@ describe('completenessScore', () =>
 
     const unknown = completeness({ seasonsHave: [1], seasonsInLibrary: [1], cards: 5, cardsInLibrary: 0 })
     expect(completenessScore(unknown)).toBe(6)
+  })
+})
+
+describe('sortByCompleteness', () =>
+{
+  interface Entry { name: string; c: Completeness | null }
+  const entry = (name: string, c: Completeness | null): Entry => ({ name, c })
+  const names = (entries: Entry[]) => entries.map(e => e.name)
+  const full = completeness({ seasonsHave: range(1, 5), cards: 52 })
+  const partial = completeness()
+  const bare = completeness({ seasonsHave: [], cards: 0 })
+
+  it('puts the most complete set first', () =>
+  {
+    const sorted = sortByCompleteness([entry('bare', bare), entry('full', full), entry('partial', partial)], e => e.c)
+    expect(names(sorted)).toEqual(['full', 'partial', 'bare'])
+  })
+
+  it('keeps the current order between sets that score the same', () =>
+  {
+    const sorted = sortByCompleteness([entry('b', partial), entry('a', partial), entry('top', full), entry('c', partial)], e => e.c)
+    expect(names(sorted)).toEqual(['top', 'b', 'a', 'c'])
+  })
+
+  it('puts sets with no completeness last, in their current order', () =>
+  {
+    const sorted = sortByCompleteness([entry('x', null), entry('bare', bare), entry('y', null), entry('full', full)], e => e.c)
+    expect(names(sorted)).toEqual(['full', 'bare', 'x', 'y'])
+  })
+
+  it('keeps the current order when none has a completeness', () =>
+  {
+    const sorted = sortByCompleteness([entry('x', null), entry('y', null)], e => e.c)
+    expect(names(sorted)).toEqual(['x', 'y'])
+  })
+
+  it('leaves the list it was given alone', () =>
+  {
+    const input = [entry('bare', bare), entry('full', full)]
+    const sorted = sortByCompleteness(input, e => e.c)
+    expect(names(input)).toEqual(['bare', 'full'])
+    expect(sorted).not.toBe(input)
+  })
+
+  it('handles an empty list', () =>
+  {
+    expect(sortByCompleteness<Entry>([], e => e.c)).toEqual([])
   })
 })
 

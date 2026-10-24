@@ -864,14 +864,18 @@
 
 /* Multi-select filter chips - all three are on by default. No enclosing track,
    so they sit cleanly on the panel instead of inside a dark inset box. A chip
-   is filled-gold when its type is shown and dimmed when it's hidden. */
-.typeToggles {
+   is filled-gold when its type is shown and dimmed when it's hidden. A show's
+   order toggle (default order or most complete) is the same pills, but a pair
+   where exactly one is on. */
+.typeToggles,
+.orderToggles {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
 }
 
-.typeToggle {
+.typeToggle,
+.orderToggle {
   flex: 1;
   text-align: center;
   padding: 6px 12px;
@@ -886,19 +890,23 @@
   transition: color var(--duration-fast), background var(--duration-fast), border-color var(--duration-fast);
 }
 
-.typeToggle:hover {
+.typeToggle:hover,
+.orderToggle:hover {
   color: var(--color-text-primary);
   border-color: rgba(255, 255, 255, 0.18);
 }
 
 .typeToggleOn,
-.typeToggleOn:hover {
+.typeToggleOn:hover,
+.orderToggleOn,
+.orderToggleOn:hover {
   background: var(--color-accent-soft);
   border-color: var(--color-accent-border);
   color: var(--color-accent-hover);
 }
 
-.typeToggleOn:hover { background: var(--color-accent-soft-hover); }
+.typeToggleOn:hover,
+.orderToggleOn:hover { background: var(--color-accent-soft-hover); }
 
 /* On a wider panel the dropdown and chips share one row, chips sized to content;
    on a narrow panel they stack and the chips fill the row as equal thirds. The
@@ -910,8 +918,8 @@
   /* The uploader dropdown: first in the row, or right after the source chips. */
   .filters > :first-child:not(.sourceToggles),
   .filters > .sourceToggles + * { flex: 1 1 auto; min-width: 0; }
-  .typeToggles { flex: 0 0 auto; flex-wrap: nowrap; }
-  .typeToggle { flex: 0 0 auto; }
+  .typeToggles, .orderToggles { flex: 0 0 auto; flex-wrap: nowrap; }
+  .typeToggle, .orderToggle { flex: 0 0 auto; }
 }
 
 .panelBody {
@@ -1058,6 +1066,16 @@
 }
 
 .setCounts { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* How much of the show's library a set covers: two quiet lines of text under the
+   counts, so the posters stay the loudest thing on the card. */
+.setCompleteness {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
 
 .countBadge {
   font-size: 10px;
