@@ -1087,7 +1087,9 @@ export function appliedUrlIndex(records: AppliedRecord[]): Map<string, Set<strin
 /**
  * Merges new applied entries into history. Entries dedupe on item, set and source, the
  * per-poster URLs and slots accumulate, and the newest entries move to the
- * front.
+ * front. Each entry also takes the art groups its slots fill from whichever
+ * set held them, and every record of the item has its `groups` rewritten to
+ * match.
  *
  * @param existing - Current history, newest first.
  * @param incoming - Entries to record.
@@ -1106,7 +1108,10 @@ export function mergeAppliedRecords(existing: AppliedRecord[], incoming: Applied
     const posterUrls = [...new Set([...(prior?.posterUrls ?? []), ...(rec.posterUrls ?? [])])]
     const merged: AppliedRecord = { ...rec, posterUrls }
     if (prior?.slots || rec.slots) merged.slots = [...new Set([...(prior?.slots ?? []), ...(rec.slots ?? [])])]
-    list = [merged, ...list.filter(r => !same(r))]
+    const sameItem = (r: AppliedRecord) => r.itemKey === rec.itemKey
+    const owners = groupOwners(list.filter(sameItem))
+    for (const group of groupsOfSlots(rec.slots)) owners[group] = merged
+    list = [merged, ...list.filter(r => !same(r))].map(r => sameItem(r) ? { ...r, groups: ownedGroups(r, owners) } : r)
   }
   return list.slice(0, cap)
 }
@@ -1123,6 +1128,118 @@ export function posterSlot(p: Pick<PosterInfo, 'season' | 'episode'>): string
   if (p.episode != null) return `s${p.season ?? '?'}e${p.episode}`
   if (typeof p.season === 'number') return `s${p.season}`
   return 'poster'
+}
+
+/** A kind of art an item carries. A set owns an item's art one group at a time. */
+export type ArtGroup = 'poster' | 'seasons' | 'cards' | 'backdrop'
+
+/** Every art group, in display order. */
+export const ART_GROUPS: ArtGroup[] = ['poster', 'seasons', 'cards', 'backdrop']
+
+/**
+ * Sorts a slot into its art group.
+ *
+ * @param slot - Slot from {@link posterSlot}.
+ * @returns seasons for s<n>, cards for s<n>e<n>, backdrop for the backdrop, else poster.
+ */
+export function slotGroup(slot: string): ArtGroup
+{
+  if (slot === 'backdrop') return 'backdrop'
+  if (/^s\d+$/.test(slot)) return 'seasons'
+  if (/^s.*e\d+$/.test(slot)) return 'cards'
+  return 'poster'
+}
+
+/**
+ * Names the art groups a set of slots touches.
+ *
+ * @param slots - Slots from {@link posterSlot}; undefined for a record written before slots were tracked.
+ * @returns Each group once, in {@link ART_GROUPS} order; every group when there are no slots to go by.
+ */
+export function groupsOfSlots(slots: string[] | undefined): ArtGroup[]
+{
+  if (!slots) return [...ART_GROUPS]
+  const touched = new Set(slots.map(slotGroup))
+  return ART_GROUPS.filter(g => touched.has(g))
+}
+
+/** The set that owns an art group on an item, and what the UI needs to show it. */
+export interface ArtOwner
+{
+  /** The set's {@link coverageKey}, or an empty string for a manual upload. */
+  setKey: string
+  source: 'mediux' | 'posterdb'
+  setId?: string
+  uploader?: string
+  thumb?: string
+}
+
+type GroupOwners = Partial<Record<ArtGroup, AppliedRecord>>
+
+/**
+ * Works out which record owns each art group on one item. A record with
+ * explicit groups owns them, the newest such record winning a group. Records
+ * written before groups existed claim what their slots fill, oldest first, so
+ * the latest set to fill a group holds it; explicit ownership wins over that.
+ *
+ * @param records - Every applied record of one item.
+ * @returns The owning record per group; a group nobody filled is absent.
+ */
+function groupOwners(records: AppliedRecord[]): GroupOwners
+{
+  const owners: GroupOwners = {}
+  const time = (r: AppliedRecord) => Date.parse(r.appliedAt) || 0
+  // The sort is stable, so records sharing a timestamp keep their newest-first list order.
+  const oldestFirst = records.slice().sort((a, b) => time(b) - time(a)).reverse()
+  for (const r of oldestFirst)
+  {
+    if (!r.groups) for (const group of groupsOfSlots(r.slots)) owners[group] = r
+  }
+  for (const r of oldestFirst)
+  {
+    for (const group of r.groups ?? []) owners[group] = r
+  }
+  return owners
+}
+
+/**
+ * Lists the groups of an item that a record owns.
+ *
+ * @param r - The record.
+ * @param owners - Ownership of the record's item.
+ * @returns The record's groups, in {@link ART_GROUPS} order.
+ */
+function ownedGroups(r: AppliedRecord, owners: GroupOwners): ArtGroup[]
+{
+  const key = recordCoverageKey(r)
+  return ART_GROUPS.filter(g =>
+  {
+    const owner = owners[g]
+    return !!owner && recordCoverageKey(owner) === key
+  })
+}
+
+/**
+ * Tells which set owns each art group on each item.
+ *
+ * @param records - Applied-poster history.
+ * @returns Item key to the owner of each group the item has art for.
+ */
+export function artOwners(records: AppliedRecord[]): Map<string, Partial<Record<ArtGroup, ArtOwner>>>
+{
+  const result = new Map<string, Partial<Record<ArtGroup, ArtOwner>>>()
+  for (const [itemKey, list] of appliedByItem(records))
+  {
+    const owners: Partial<Record<ArtGroup, ArtOwner>> = {}
+    const byRecord = groupOwners(list)
+    for (const group of ART_GROUPS)
+    {
+      const r = byRecord[group]
+      if (r) owners[group] = { setKey: recordCoverageKey(r), source: r.source, setId: r.setId, uploader: r.uploader, thumb: r.thumb }
+    }
+    result.set(itemKey, owners)
+  }
+  return result
 }
 
 /** Which sets have filled each slot on each item, for fill-gaps jobs. */

@@ -9,6 +9,7 @@ import {
   analyzeUrls,
   appliedUrlIndex,
   artFilterMatches,
+  artOwners,
   creatorOfUrl,
   creatorSyncUrl,
   cronExpressionError,
@@ -21,6 +22,7 @@ import {
   failedRun,
   finishRun,
   formToCron,
+  groupsOfSlots,
   mediuxSetId,
   mergeAppliedRecords,
   posterdbSetId,
@@ -33,8 +35,10 @@ import {
   relativeTime,
   scheduleCoverage,
   setRefOfUrl,
+  slotGroup,
   urlKey,
   withNextRun,
+  type ArtGroup,
   type ScheduleForm,
 } from '../../electron/services/scheduleUtils'
 
@@ -547,6 +551,122 @@ describe('applied history', () =>
     const existing = [rec({ itemKey: '1', setId: '42', source: 'mediux', posterUrls: ['m'] })]
     const merged = mergeAppliedRecords(existing, [rec({ itemKey: '1', setId: '42', source: 'posterdb', posterUrls: ['p'] })])
     expect(merged.map(r => [r.source, r.posterUrls])).toEqual([['posterdb', ['p']], ['mediux', ['m']]])
+  })
+})
+
+describe('art ownership', () =>
+{
+  const ALL: ArtGroup[] = ['poster', 'seasons', 'cards', 'backdrop']
+  const rec = (overrides: Partial<AppliedRecord>): AppliedRecord => ({
+    itemKey: '10', title: 'Show', type: 'show', source: 'mediux', appliedAt: '2026-10-01T00:00:00.000Z', ...overrides,
+  })
+  const groupsOf = (list: AppliedRecord[], setId: string, source: 'mediux' | 'posterdb' = 'mediux') =>
+    list.find(r => r.setId === setId && r.source === source)?.groups
+
+  it('sorts a slot into its art group', () =>
+  {
+    expect(['poster', 'backdrop', 's3', 's0', 's3e7', 's0e1', 's?e2'].map(slotGroup))
+      .toEqual(['poster', 'backdrop', 'seasons', 'seasons', 'cards', 'cards', 'cards'])
+  })
+
+  it('lists the groups of a slot set once each, in group order', () =>
+  {
+    expect(groupsOfSlots(['s2e1', 'poster', 's1'])).toEqual(['poster', 'seasons', 'cards'])
+    expect(groupsOfSlots(['s1e1', 's1e2'])).toEqual(['cards'])
+    expect(groupsOfSlots([])).toEqual([])
+    expect(groupsOfSlots(undefined)).toEqual(ALL)
+  })
+
+  it('derives owners from slots on records written before groups existed', () =>
+  {
+    const owners = artOwners([
+      rec({ setId: '2', slots: ['s1e1'], appliedAt: '2026-10-02T00:00:00.000Z' }),
+      rec({ setId: '1', slots: ['poster', 's1', 's1e1'], uploader: 'alice', thumb: 't' }),
+    ]).get('10')!
+    expect(owners.poster).toEqual({ setKey: 'mediux:1', source: 'mediux', setId: '1', uploader: 'alice', thumb: 't' })
+    expect(owners.seasons?.setKey).toBe('mediux:1')
+    expect(owners.cards).toEqual({ setKey: 'mediux:2', source: 'mediux', setId: '2' })
+    expect(owners.backdrop).toBeUndefined()
+  })
+
+  it('lets a record without slots own every group', () =>
+  {
+    const owners = artOwners([rec({ setId: '1' })]).get('10')!
+    expect(ALL.map(g => owners[g]?.setKey)).toEqual(ALL.map(() => 'mediux:1'))
+  })
+
+  it('keeps manual uploads under an empty set key', () =>
+  {
+    const owners = artOwners([rec({ slots: ['poster'] })]).get('10')!
+    expect(owners.poster).toEqual({ setKey: '', source: 'mediux' })
+  })
+
+  it('prefers explicit groups over what slots imply', () =>
+  {
+    const owners = artOwners([
+      rec({ setId: 'A', slots: ['poster', 's1'], groups: ['poster'], appliedAt: '2026-10-05T00:00:00.000Z' }),
+      rec({ setId: 'B', slots: ['s1'], groups: ['seasons'], appliedAt: '2026-10-01T00:00:00.000Z' }),
+    ]).get('10')!
+    expect(owners.poster?.setId).toBe('A')
+    expect(owners.seasons?.setId).toBe('B')
+  })
+
+  it('keeps the owners of different items apart', () =>
+  {
+    const owners = artOwners([rec({ itemKey: '10', setId: '1', slots: ['poster'] }), rec({ itemKey: '11', setId: '2', slots: ['poster'] })])
+    expect(owners.get('10')!.poster?.setId).toBe('1')
+    expect(owners.get('11')!.poster?.setId).toBe('2')
+  })
+
+  it('takes the groups a newly applied set fills from the set that owned them', () =>
+  {
+    const existing = [rec({ setId: 'A', slots: ['poster', 's1', 's1e1'], posterUrls: ['pa'], groups: ALL })]
+    const merged = mergeAppliedRecords(existing, [
+      rec({ setId: 'B', slots: ['s1e1', 's1e2'], posterUrls: ['pb'], appliedAt: '2026-10-02T00:00:00.000Z' }),
+    ])
+    expect(groupsOf(merged, 'A')).toEqual(['poster', 'seasons', 'backdrop'])
+    expect(groupsOf(merged, 'B')).toEqual(['cards'])
+    const a = merged.find(r => r.setId === 'A')!
+    expect(a.posterUrls).toEqual(['pa'])
+    expect(a.slots).toEqual(['poster', 's1', 's1e1'])
+  })
+
+  it('derives ownership from the slots of older history before a set claims', () =>
+  {
+    const existing = [
+      rec({ setId: 'B', slots: ['s1e1'], appliedAt: '2026-10-02T00:00:00.000Z' }),
+      rec({ setId: 'A', slots: ['poster', 'backdrop', 's1', 's1e1'] }),
+    ]
+    const merged = mergeAppliedRecords(existing, [rec({ setId: 'A', slots: ['s2'], appliedAt: '2026-10-03T00:00:00.000Z' })])
+    expect(groupsOf(merged, 'A')).toEqual(['poster', 'seasons', 'backdrop'])
+    expect(groupsOf(merged, 'B')).toEqual(['cards'])
+  })
+
+  it('keeps a set\'s other groups when it is applied again', () =>
+  {
+    const existing = [rec({ setId: 'A', slots: ['poster', 's1'], groups: ['poster', 'seasons'] })]
+    const merged = mergeAppliedRecords(existing, [rec({ setId: 'A', slots: ['s2'], appliedAt: '2026-10-02T00:00:00.000Z' })])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].groups).toEqual(['poster', 'seasons'])
+    expect(merged[0].slots).toEqual(['poster', 's1', 's2'])
+  })
+
+  it('does not mix up a MediUX and a ThePosterDB set that share an id', () =>
+  {
+    const existing = [rec({ setId: '42', source: 'mediux', slots: ['poster'], groups: ['poster'] })]
+    const merged = mergeAppliedRecords(existing, [
+      rec({ setId: '42', source: 'posterdb', slots: ['poster'], appliedAt: '2026-10-02T00:00:00.000Z' }),
+    ])
+    expect(groupsOf(merged, '42', 'mediux')).toEqual([])
+    expect(groupsOf(merged, '42', 'posterdb')).toEqual(['poster'])
+  })
+
+  it('leaves the records of other items alone', () =>
+  {
+    const other = rec({ itemKey: '11', setId: 'A', slots: ['poster'] })
+    const merged = mergeAppliedRecords([other], [rec({ setId: 'B', slots: ['poster'] })])
+    expect(merged.find(r => r.itemKey === '11')).toBe(other)
+    expect(other.groups).toBeUndefined()
   })
 })
 

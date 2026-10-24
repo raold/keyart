@@ -1,3 +1,5 @@
+import type { ArtGroup } from '../services/scheduleUtils'
+
 export interface ConnectReq {
   baseUrl: string
   token: string
@@ -219,6 +221,11 @@ export interface AppliedRecord {
    * none and count as covering the whole item.
    */
   slots?: string[]
+  /**
+   * Art groups this set owns on the item, as of its last apply. Records written
+   * before 1.3 have none, and ownership is worked out from their slots.
+   */
+  groups?: ArtGroup[]
   /** ISO timestamp. */
   appliedAt: string
 }
