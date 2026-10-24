@@ -10,6 +10,7 @@ import {
   appliedUrlIndex,
   artFilterMatches,
   artOwners,
+  claimGroup,
   creatorOfUrl,
   creatorSyncUrl,
   cronExpressionError,
@@ -28,6 +29,7 @@ import {
   posterdbSetId,
   nextCronRuns,
   normalizeJob,
+  ownedByOther,
   planQuickSync,
   previewCron,
   recordRun,
@@ -667,6 +669,50 @@ describe('art ownership', () =>
     const merged = mergeAppliedRecords([other], [rec({ setId: 'B', slots: ['poster'] })])
     expect(merged.find(r => r.itemKey === '11')).toBe(other)
     expect(other.groups).toBeUndefined()
+  })
+
+  it('tells when another set owns the group a slot belongs to', () =>
+  {
+    const owners = artOwners([rec({ setId: 'A', slots: ['poster', 's1e1'], groups: ['poster', 'cards'] })])
+    expect(ownedByOther(owners, '10', 'poster', 'mediux:B')).toBe(true)
+    expect(ownedByOther(owners, '10', 's1e2', 'mediux:B')).toBe(true)
+    expect(ownedByOther(owners, '10', 'poster', 'mediux:A')).toBe(false)
+    expect(ownedByOther(owners, '10', 's1e2', 'mediux:A')).toBe(false)
+    expect(ownedByOther(owners, '10', 's1', 'mediux:B')).toBe(false)
+    expect(ownedByOther(owners, '11', 'poster', 'mediux:B')).toBe(false)
+  })
+
+  it('keeps a MediUX set and a ThePosterDB set with the same id apart when checking owners', () =>
+  {
+    const owners = artOwners([rec({ setId: '42', source: 'mediux', slots: ['poster'], groups: ['poster'] })])
+    expect(ownedByOther(owners, '10', 'poster', 'posterdb:42')).toBe(true)
+    expect(ownedByOther(owners, '10', 'poster', 'mediux:42')).toBe(false)
+  })
+
+  it('leaves a manually applied group to every set, and a set\'s groups to a job with no set', () =>
+  {
+    const manual = artOwners([rec({ slots: ['poster'], groups: ['poster'] })])
+    expect(ownedByOther(manual, '10', 'poster', 'mediux:A')).toBe(true)
+    expect(ownedByOther(manual, '10', 'poster')).toBe(false)
+    expect(ownedByOther(manual, '10', 'poster', '')).toBe(false)
+    const owned = artOwners([rec({ setId: 'A', slots: ['poster'], groups: ['poster'] })])
+    expect(ownedByOther(owned, '10', 'poster')).toBe(true)
+  })
+
+  it('counts art applied before slot tracking as owning every group', () =>
+  {
+    const owners = artOwners([rec({ setId: 'A' })])
+    expect(['poster', 's1', 's1e1', 'backdrop'].map(slot => ownedByOther(owners, '10', slot, 'mediux:B'))).toEqual([true, true, true, true])
+  })
+
+  it('claims a group for a set during a run', () =>
+  {
+    const owners = artOwners([])
+    claimGroup(owners, '10', 'cards', { setKey: 'mediux:A', source: 'mediux', setId: 'A' })
+    expect(ownedByOther(owners, '10', 's1e1', 'mediux:B')).toBe(true)
+    expect(ownedByOther(owners, '10', 's1e1', 'mediux:A')).toBe(false)
+    expect(ownedByOther(owners, '10', 'poster', 'mediux:B')).toBe(false)
+    expect(ownedByOther(owners, '11', 's1e1', 'mediux:B')).toBe(false)
   })
 })
 

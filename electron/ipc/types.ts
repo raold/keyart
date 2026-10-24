@@ -377,7 +377,7 @@ export interface JobRun {
   failed: number
   /** URLs that could not be scraped. */
   urlErrors: number
-  /** Posters left alone because other art already fills their slot (fill-gaps jobs). */
+  /** Posters left alone because another set owns their art group. */
   covered?: number
   /** Posters whose season or episode does not exist on the matched Plex item. */
   noTarget?: number
@@ -420,8 +420,6 @@ export interface ScheduledJob {
   enabled: boolean
   /** Upload only artwork not already applied to each item. Treated as true when unset. */
   skipApplied?: boolean
-  /** Leave any slot that other art already fills, so this job only fills gaps. */
-  fillGaps?: boolean
   /** MediUX creator this job syncs, set for jobs created from the Creators view. */
   creator?: string
   lastRun?: string

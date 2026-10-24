@@ -103,7 +103,6 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
   const [schedule,    setSchedule]    = useState<ScheduleForm>(() => cronToForm(initial?.cronExpr ?? '0 3 * * *'))
   const [enabled,     setEnabled]     = useState(initial?.enabled ?? true)
   const [skipApplied, setSkipApplied] = useState(initial?.skipApplied !== false)
-  const [fillGaps,    setFillGaps]    = useState(initial?.fillGaps === true)
   const [saving,      setSaving]      = useState(false)
   const [error,       setError]       = useState<string | null>(null)
 
@@ -132,7 +131,6 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
         cronExpr,
         enabled,
         skipApplied,
-        fillGaps,
       }, runAfterSave)
     } catch (err) {
       setError(errorMessage(err))
@@ -369,13 +367,6 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
           />
 
           <Switch
-            label="Only fill gaps"
-            description="Leaves any poster, season, or episode that other art already covers, whether from another job or applied by hand. Use this for a backup creator that should only add what your main creator is missing."
-            checked={fillGaps}
-            onChange={setFillGaps}
-          />
-
-          <Switch
             label="Enable this job"
             description="Disabled jobs are saved but won't run on schedule."
             checked={enabled}
@@ -501,7 +492,6 @@ function JobCard({ job, now, starting, canMoveUp, canMoveDown, onEdit, onDelete,
                 <><span className={styles.dot} /><span title={new Date(job.lastRun).toLocaleString()}>last ran {relativeTime(job.lastRun, now)}</span></>
               )}
               {job.skipApplied === false && <><span className={styles.dot} /><span>re-applies everything</span></>}
-              {job.fillGaps && <><span className={styles.dot} /><span>fills gaps only</span></>}
             </div>
             {isRunning && job.progress && (
               <span className={styles.cardProgress} title={job.progress.current}>{describeProgress(job.progress)}</span>

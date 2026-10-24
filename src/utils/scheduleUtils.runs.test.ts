@@ -2,20 +2,16 @@ import { describe, it, expect } from 'vitest'
 import type { AppliedRecord, ScheduledJob } from '../../electron/ipc/types'
 import {
   MAX_RUN_DETAIL,
-  addSlotCoverage,
-  coverageKey,
   describeProgress,
   describeRun,
   emptyTally,
   finishRun,
-  isSlotCovered,
   mergeAppliedRecords,
   normalizeJob,
   posterKind,
   posterSlot,
   reorderJobs,
   runDetails,
-  slotCoverage,
   titleLabel,
 } from '../../electron/services/scheduleUtils'
 
@@ -50,52 +46,6 @@ describe('posterSlot and posterKind', () =>
     expect(posterKind({ season: 2 })).toBe('poster')
     expect(posterKind({ season: 1, episode: 3 })).toBe('title_card')
     expect(posterKind({ season: 'Backdrop' })).toBe('backdrop')
-  })
-})
-
-describe('slot coverage', () =>
-{
-  const A = coverageKey('mediux', 'A')
-  const B = coverageKey('mediux', 'B')
-
-  it('treats a record without slots as covering the whole item, except for its own set', () =>
-  {
-    const coverage = slotCoverage([rec({ setId: 'A' })])
-    expect(isSlotCovered(coverage, '1', 's1e1', B)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 'poster', B)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 's1e1', A)).toBe(false)
-    expect(isSlotCovered(coverage, '2', 's1e1', B)).toBe(false)
-  })
-
-  it('covers only the slots a slot-tracked record lists', () =>
-  {
-    const coverage = slotCoverage([rec({ setId: 'A', slots: ['s1e1', 'poster'] })])
-    expect(isSlotCovered(coverage, '1', 's1e1', B)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 'poster', B)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 's1e2', B)).toBe(false)
-    expect(isSlotCovered(coverage, '1', 's1e1', A)).toBe(false)
-  })
-
-  it('counts art applied by hand against every set', () =>
-  {
-    const coverage = slotCoverage([rec({ slots: ['s1e1'] })])
-    expect(isSlotCovered(coverage, '1', 's1e1', A)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 's1e1')).toBe(false)
-  })
-
-  it('sees slots filled earlier in the same run', () =>
-  {
-    const coverage = slotCoverage([])
-    addSlotCoverage(coverage, '1', 's1e1', A)
-    expect(isSlotCovered(coverage, '1', 's1e1', B)).toBe(true)
-    expect(isSlotCovered(coverage, '1', 's1e1', A)).toBe(false)
-  })
-
-  it('keeps a MediUX set and a ThePosterDB set with the same id apart', () =>
-  {
-    const coverage = slotCoverage([rec({ setId: '42', slots: ['poster'], source: 'mediux' })])
-    expect(isSlotCovered(coverage, '1', 'poster', coverageKey('posterdb', '42'))).toBe(true)
-    expect(isSlotCovered(coverage, '1', 'poster', coverageKey('mediux', '42'))).toBe(false)
   })
 })
 
@@ -200,10 +150,9 @@ describe('normalizeJob fillGaps', () =>
   const base = { name: 'A', urls: ['https://mediux.pro/sets/1'], cronExpr: '0 3 * * *' }
   const makeId = () => 'id'
 
-  it('keeps fill gaps only when explicitly on', () =>
+  it('drops the retired fill gaps flag from saved jobs', () =>
   {
-    expect(normalizeJob({ ...base, fillGaps: true }, undefined, { makeId }).fillGaps).toBe(true)
-    expect(normalizeJob(base, undefined, { makeId }).fillGaps).toBeUndefined()
-    expect(normalizeJob({ ...base, fillGaps: 'yes' }, undefined, { makeId }).fillGaps).toBeUndefined()
+    expect(normalizeJob({ ...base, fillGaps: true }, undefined, { makeId })).not.toHaveProperty('fillGaps')
+    expect(normalizeJob(base, undefined, { makeId })).not.toHaveProperty('fillGaps')
   })
 })

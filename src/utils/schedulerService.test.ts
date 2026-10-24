@@ -178,7 +178,7 @@ describe('SchedulerService._execute', () =>
   it('uploads only new artwork, counts titles not in the library, and records the run', async () =>
   {
     state.config.scheduledJobs = [job()]
-    state.config.appliedPosters = [applied('10', ['s1'])]
+    state.config.appliedPosters = [applied('10', ['s1'], { setId: '100' })]
     scrapeReturns({
       [SET_URL]: [
         poster('main'),
@@ -197,7 +197,7 @@ describe('SchedulerService._execute', () =>
     expect(stored.history).toHaveLength(1)
     expect(stored.history![0]).toMatchObject({ trigger: 'manual', status: 'success', uploaded: 2, skipped: 1, unmatched: 1, failed: 0, urlErrors: 0 })
     expect(stored.history![0].details).toEqual({ applied: ['Show (2020) · 2 posters'], unmatched: ['Missing (2020)'], failed: [] })
-    expect(state.config.appliedPosters![0]).toMatchObject({ itemKey: '10', setId: '100', posterUrls: ['main', 'e1'], slots: ['poster', 's1e1'], thumb: 'main' })
+    expect(state.config.appliedPosters![0]).toMatchObject({ itemKey: '10', setId: '100', posterUrls: ['s1', 'main', 'e1'], slots: ['poster', 's1e1'], thumb: 'main' })
   })
 
   it('records the set id and site for a ThePosterDB set job', async () =>
@@ -218,7 +218,7 @@ describe('SchedulerService._execute', () =>
   {
     const noSkip = job({ skipApplied: false })
     state.config.scheduledJobs = [noSkip]
-    state.config.appliedPosters = [applied('10', ['main', 's1'])]
+    state.config.appliedPosters = [applied('10', ['main', 's1'], { setId: '100' })]
     scrapeReturns({ [SET_URL]: [poster('main'), poster('s1', { season: 1 })] })
 
     await SchedulerService._execute(noSkip, 'schedule')
@@ -227,31 +227,87 @@ describe('SchedulerService._execute', () =>
     expect(storedJob().history![0]).toMatchObject({ uploaded: 2, skipped: 0 })
   })
 
-  it('leaves slots other art already fills when the job only fills gaps', async () =>
+  it('leaves groups another set owns', async () =>
   {
-    const backup = job({ fillGaps: true })
-    state.config.scheduledJobs = [backup]
-    state.config.appliedPosters = [applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'] })]
+    state.config.scheduledJobs = [job()]
+    state.config.appliedPosters = [applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'], groups: ['cards'] })]
     scrapeReturns({ [SET_URL]: [poster('main'), poster('e1', { season: 1, episode: 1 }), poster('e2', { season: 1, episode: 2 })] })
 
-    await SchedulerService._execute(backup, 'schedule')
+    await SchedulerService._execute(job(), 'schedule')
 
-    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['main', 'e2'])
-    expect(storedJob().history![0]).toMatchObject({ uploaded: 2, covered: 1, status: 'success' })
-    expect(storedJob().history![0].details!.covered).toEqual(['Show (2020) · 1 poster'])
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['main'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 1, covered: 2, status: 'success' })
+    expect(storedJob().history![0].details!.covered).toEqual(['Show (2020) · 2 posters'])
   })
 
-  it('treats art applied before slot tracking as covering the whole show', async () =>
+  it('adds title cards for new episodes to the set that owns them', async () =>
   {
-    const backup = job({ fillGaps: true })
-    state.config.scheduledJobs = [backup]
+    state.config.scheduledJobs = [job()]
+    state.config.appliedPosters = [
+      applied('10', ['e1'], { setId: '100', slots: ['s1e1'], groups: ['cards'] }),
+      applied('10', ['other-main'], { setId: '7', slots: ['poster'], groups: ['poster'] }),
+    ]
+    scrapeReturns({ [SET_URL]: [poster('main'), poster('e1', { season: 1, episode: 1 }), poster('e2', { season: 1, episode: 2 })] })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['e2'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 1, skipped: 1, covered: 1 })
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('100')).toMatchObject({ posterUrls: ['e1', 'e2'], slots: ['s1e1', 's1e2'], groups: ['cards'] })
+    expect(byId('7')).toMatchObject({ posterUrls: ['other-main'], groups: ['poster'] })
+  })
+
+  it('treats art applied before slot tracking as owning the whole show', async () =>
+  {
+    state.config.scheduledJobs = [job()]
     state.config.appliedPosters = [applied('10', ['old'], { setId: '7' })]
     scrapeReturns({ [SET_URL]: [poster('main'), poster('e1', { season: 1, episode: 1 })] })
 
-    await SchedulerService._execute(backup, 'schedule')
+    await SchedulerService._execute(job(), 'schedule')
 
     expect(PlexService.uploadPoster).not.toHaveBeenCalled()
     expect(storedJob().history![0]).toMatchObject({ uploaded: 0, covered: 2 })
+  })
+
+  it('leaves a manual upload alone', async () =>
+  {
+    state.config.scheduledJobs = [job()]
+    state.config.appliedPosters = [applied('10', ['mine'], { slots: ['poster'], groups: ['poster'] })]
+    scrapeReturns({ [SET_URL]: [poster('main'), poster('s1', { season: 1 })] })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['s1'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 1, covered: 1 })
+  })
+
+  it('fills a group nobody owns and claims it', async () =>
+  {
+    state.config.scheduledJobs = [job()]
+    scrapeReturns({ [SET_URL]: [poster('main'), poster('s1', { season: 1 }), poster('e1', { season: 1, episode: 1 })] })
+
+    await SchedulerService._execute(job(), 'schedule')
+
+    expect(PlexService.uploadPoster).toHaveBeenCalledTimes(3)
+    expect(state.config.appliedPosters).toHaveLength(1)
+    expect(state.config.appliedPosters![0]).toMatchObject({ setId: '100', groups: ['poster', 'seasons', 'cards'] })
+  })
+
+  it('keeps a group for the first set of the run to fill it', async () =>
+  {
+    const second = 'https://mediux.pro/sets/200'
+    const twoSets = job({ urls: [SET_URL, second] })
+    state.config.scheduledJobs = [twoSets]
+    scrapeReturns({ [SET_URL]: [poster('main')], [second]: [poster('other-main'), poster('bg', { season: 'Backdrop' })] })
+
+    await SchedulerService._execute(twoSets, 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['main', 'bg'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 2, covered: 1 })
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('100')?.groups).toEqual(['poster'])
+    expect(byId('200')?.groups).toEqual(['backdrop'])
   })
 
   it('is partial when an upload fails, without counting seasons Plex does not have', async () =>
@@ -355,6 +411,46 @@ describe('creator sync', () =>
     const run = storedJob().history![0]
     expect(run).toMatchObject({ status: 'success', uploaded: 2, unmatched: 1 })
     expect(run.details).toEqual({ applied: ['Show (2020) · 2 posters'], unmatched: ['Missing (2020)'], failed: [] })
+  })
+
+  it('refreshes the groups its own sets own and leaves groups another set owns', async () =>
+  {
+    const creatorJob = job({ urls: [CREATOR_URL], creator: 'willtong93' })
+    state.config.scheduledJobs = [creatorJob]
+    state.config.appliedPosters = [
+      applied('10', ['main'], { setId: '20066', uploader: 'willtong93', slots: ['poster'], groups: ['poster'] }),
+      applied('10', ['other-e1'], { setId: '7', slots: ['s1e1'], groups: ['cards'] }),
+    ]
+    vi.mocked(CreatorSetsService.catalog).mockResolvedValue({
+      capped: false,
+      sets: [userSet('20066', 'Show', [poster('main2'), poster('e1', { season: 1, episode: 1 })])],
+    })
+
+    await SchedulerService._execute(creatorJob, 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['main2'])
+    expect(storedJob().history![0]).toMatchObject({ uploaded: 1, covered: 1 })
+    expect(state.config.appliedPosters!.find(r => r.setId === '20066')).toMatchObject({ posterUrls: ['main', 'main2'], groups: ['poster'] })
+  })
+
+  it('keeps each of a creator\'s sets to the groups it fills first', async () =>
+  {
+    const creatorJob = job({ urls: [CREATOR_URL], creator: 'willtong93' })
+    state.config.scheduledJobs = [creatorJob]
+    vi.mocked(CreatorSetsService.catalog).mockResolvedValue({
+      capped: false,
+      sets: [
+        userSet('2', 'Show', [poster('cards-e1', { season: 1, episode: 1 })]),
+        userSet('1', 'Show', [poster('main'), poster('old-e1', { season: 1, episode: 1 })]),
+      ],
+    })
+
+    await SchedulerService._execute(creatorJob, 'schedule')
+
+    expect(vi.mocked(PlexService.uploadPoster).mock.calls.map(c => c[0].imageUrl)).toEqual(['cards-e1', 'main'])
+    const byId = (id: string) => state.config.appliedPosters!.find(r => r.setId === id)
+    expect(byId('2')).toMatchObject({ posterUrls: ['cards-e1'], groups: ['cards'] })
+    expect(byId('1')).toMatchObject({ posterUrls: ['main'], groups: ['poster'] })
   })
 
   it('reports the position within a set while it applies', async () =>

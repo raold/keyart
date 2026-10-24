@@ -705,7 +705,6 @@ export function normalizeJob(input: unknown, existing: ScheduledJob | undefined,
     enabled: raw.enabled !== false,
     skipApplied: raw.skipApplied !== false,
   }
-  if (raw.fillGaps === true) job.fillGaps = true
   if (creator) job.creator = creator
   if (existing?.lastRun) job.lastRun = existing.lastRun
   if (existing?.lastStatus) job.lastStatus = existing.lastStatus
@@ -1242,63 +1241,38 @@ export function artOwners(records: AppliedRecord[]): Map<string, Partial<Record<
   return result
 }
 
-/** Which sets have filled each slot on each item, for fill-gaps jobs. */
-export interface SlotCoverage
-{
-  /** Item key to the set keys (empty string when unknown) of slotless records. */
-  whole: Map<string, Set<string>>
-  /** Item key to slot to the set keys that filled it. */
-  slots: Map<string, Map<string, Set<string>>>
-}
-
 /**
- * Indexes applied-poster history by item and slot. Sets are keyed by
- * {@link coverageKey}, so a MediUX set and a ThePosterDB set that share an id
- * stay two sets.
+ * Tells whether a different set already owns the art group a slot belongs to.
+ * A group nobody owns is free, and the set that owns a group may keep
+ * refreshing it. A manual upload owns under an empty set key, so a job that
+ * has no set of its own (a show or boxset URL) refreshes those but nothing a
+ * set owns.
  *
- * @param records - Applied-poster history.
- * @returns The coverage index for {@link isSlotCovered}.
- */
-export function slotCoverage(records: AppliedRecord[]): SlotCoverage
-{
-  const coverage: SlotCoverage = { whole: new Map(), slots: new Map() }
-  for (const r of records)
-  {
-    const setKey = recordCoverageKey(r)
-    if (!r.slots)
-    {
-      let sets = coverage.whole.get(r.itemKey)
-      if (!sets) coverage.whole.set(r.itemKey, (sets = new Set()))
-      sets.add(setKey)
-      continue
-    }
-    let bySlot = coverage.slots.get(r.itemKey)
-    if (!bySlot) coverage.slots.set(r.itemKey, (bySlot = new Map()))
-    for (const slot of r.slots)
-    {
-      let sets = bySlot.get(slot)
-      if (!sets) bySlot.set(slot, (sets = new Set()))
-      sets.add(setKey)
-    }
-  }
-  return coverage
-}
-
-/**
- * Marks a slot as filled by a set, so later posters in the same run see it.
- *
- * @param coverage - Index from {@link slotCoverage}.
+ * @param owners - Item key to group owners, from {@link artOwners}.
  * @param itemKey - Plex item.
  * @param slot - Slot from {@link posterSlot}.
- * @param setKey - The set that filled it, from {@link coverageKey}.
+ * @param setKey - The set the poster comes from, from {@link coverageKey}.
+ * @returns true when the group has an owner other than that set.
  */
-export function addSlotCoverage(coverage: SlotCoverage, itemKey: string, slot: string, setKey?: string): void
+export function ownedByOther(owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>, itemKey: string, slot: string, setKey?: string): boolean
 {
-  let bySlot = coverage.slots.get(itemKey)
-  if (!bySlot) coverage.slots.set(itemKey, (bySlot = new Map()))
-  let sets = bySlot.get(slot)
-  if (!sets) bySlot.set(slot, (sets = new Set()))
-  sets.add(setKey ?? '')
+  const owner = owners.get(itemKey)?.[slotGroup(slot)]
+  return !!owner && owner.setKey !== (setKey ?? '')
+}
+
+/**
+ * Records that a set now owns a group, so later posters in the same run see it.
+ *
+ * @param owners - Item key to group owners, from {@link artOwners}.
+ * @param itemKey - Plex item.
+ * @param group - The group the set filled.
+ * @param owner - The set that filled it.
+ */
+export function claimGroup(owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>, itemKey: string, group: ArtGroup, owner: ArtOwner): void
+{
+  let byGroup = owners.get(itemKey)
+  if (!byGroup) owners.set(itemKey, (byGroup = {}))
+  byGroup[group] = owner
 }
 
 /**
@@ -1312,24 +1286,6 @@ export function posterKind(p: Pick<PosterInfo, 'season' | 'episode'>): 'poster' 
   if (p.season === 'Backdrop') return 'backdrop'
   if (p.episode != null) return 'title_card'
   return 'poster'
-}
-
-/**
- * Tells whether art from another set already fills a slot. Records without
- * slots predate slot tracking and count as covering every slot on their item.
- * The poster's own set never blocks it, so an updated card still applies.
- *
- * @param coverage - Index from {@link slotCoverage}.
- * @param itemKey - Plex item.
- * @param slot - Slot from {@link posterSlot}.
- * @param setKey - The set the poster comes from, from {@link coverageKey}.
- * @returns true when a different set has filled the slot.
- */
-export function isSlotCovered(coverage: SlotCoverage, itemKey: string, slot: string, setKey?: string): boolean
-{
-  const own = setKey ?? ''
-  const other = (sets?: Set<string>) => !!sets && [...sets].some(s => s !== own)
-  return other(coverage.whole.get(itemKey)) || other(coverage.slots.get(itemKey)?.get(slot))
 }
 
 /**

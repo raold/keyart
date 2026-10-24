@@ -13,9 +13,9 @@ import { getUserDataPath } from '../runtime/paths'
 import { appEvents } from '../runtime/events'
 import { isWebMode } from '../runtime/runtime'
 import {
-  addSlotCoverage, appliedUrlIndex, coverageKey, creatorOfUrl, describeRun, emptyTally, failedRun, finishRun, isSlotCovered,
-  mergeAppliedRecords, normalizeJob, posterKind, posterSlot, previewCron, recordRun, recoverInterrupted, setRefOfUrl,
-  reorderJobs, slotCoverage, titleLabel, withNextRun, type RunTally, type SlotCoverage,
+  appliedUrlIndex, artOwners, claimGroup, coverageKey, creatorOfUrl, describeRun, emptyTally, failedRun, finishRun,
+  mergeAppliedRecords, normalizeJob, ownedByOther, posterKind, posterSlot, previewCron, recordRun, recoverInterrupted, setRefOfUrl,
+  reorderJobs, slotGroup, titleLabel, withNextRun, type ArtGroup, type ArtOwner, type RunTally,
 } from './scheduleUtils'
 
 const ENGINE_FILE     = 'scheduler-engine.json'
@@ -66,8 +66,8 @@ interface RunContext {
   tally: RunTally
   /** Item key to image URLs already applied; null when the job re-applies everything. */
   applied: Map<string, Set<string>> | null
-  /** Slot coverage for fill-gaps jobs; null otherwise. */
-  coverage: SlotCoverage | null
+  /** Item key to the set that owns each of its art groups; updated as the run fills them. */
+  owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>
   /** MediUX file types the user has enabled. */
   filters: Set<string>
   lookups: Map<string, Promise<ResolvedItem | null>>
@@ -450,7 +450,7 @@ export const SchedulerService = {
         return
       }
       const slot = posterSlot(poster)
-      if (ctx.coverage && isSlotCovered(ctx.coverage, target.key, slot, source.setKey)) {
+      if (ownedByOther(ctx.owners, target.key, slot, source.setKey)) {
         tally.covered++
         tally.coveredTitles.set(targetLabel, (tally.coveredTitles.get(targetLabel) ?? 0) + 1)
         return
@@ -480,7 +480,9 @@ export const SchedulerService = {
 
       tally.uploaded++
       tally.appliedTitles.set(targetLabel, (tally.appliedTitles.get(targetLabel) ?? 0) + 1)
-      if (ctx.coverage) addSlotCoverage(ctx.coverage, target.key, slot, source.setKey)
+      claimGroup(ctx.owners, target.key, slotGroup(slot), {
+        setKey: source.setKey ?? '', source: poster.source, setId: source.setId, uploader: source.uploader,
+      })
 
       const recKey = `${target.key}|${source.setKey ?? ''}`
       const isMain = poster.season == null && poster.episode == null
@@ -536,7 +538,7 @@ export const SchedulerService = {
       for (let j = 0; j < posters.length; j++) {
         const poster = posters[j]
         this._setProgress(job.id, { phase: 'applying', done: i, total: sets.length, current, poster: { done: j, total: posters.length } })
-        await this._applyPoster(ctx, poster, { setId: set.id, uploader: set.uploader, mediaType: set.mediaType })
+        await this._applyPoster(ctx, poster, { setId: set.id, setKey: coverageKey(set.source, set.id), uploader: set.uploader, mediaType: set.mediaType })
       }
     }
   },
@@ -583,7 +585,7 @@ export const SchedulerService = {
         job,
         tally: emptyTally(job.urls.length),
         applied: job.skipApplied === false ? null : appliedUrlIndex(history),
-        coverage: job.fillGaps ? slotCoverage(history) : null,
+        owners: artOwners(history),
         filters: new Set(cfg.mediuxFilters ?? ['poster', 'backdrop', 'title_card']),
         lookups: new Map(),
         records: new Map(),
