@@ -475,7 +475,7 @@ export interface LibraryItem {
 }
 
 /** Sort field for the Library Browser grid (mapped to a Plex sort key). */
-export type LibrarySort = 'recentlyAdded' | 'title' | 'year' | 'lastPlayed'
+export type LibrarySort = 'recentlyAdded' | 'title' | 'year' | 'lastPlayed' | 'lastEpisodeAdded'
 export type SortDir = 'asc' | 'desc'
 
 /** Narrows the Library Browser grid by applied-artwork history. */

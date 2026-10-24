@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { AppliedRecord } from '../../electron/ipc/types'
-import { applyGridQuery, historyKeysFor, lightComparator, needsHistoryOnly, toLightItem, type LightItem } from '../../electron/services/libraryGrid'
+import { applyGridQuery, historyKeysFor, lightComparator, needsHistoryOnly, plexSortParam, toLightItem, withEpisodeOrder, type LightItem } from '../../electron/services/libraryGrid'
 import { appliedByItem, creatorSyncUrl, scheduleCoverage } from '../../electron/services/scheduleUtils'
 
 function light(key: string, title: string, extra: Partial<LightItem> = {}): LightItem
@@ -41,6 +41,42 @@ describe('lightComparator', () =>
     expect(ids('year', 'asc')).toEqual(['2', '1', '3'])
     expect(ids('lastPlayed', 'desc')).toEqual(['2', '3', '1'])
     expect([light('b', 'Same', { year: 1 }), light('a', 'Same', { year: 1 })].sort(lightComparator('year', 'asc')).map(i => i.key)).toEqual(['b', 'a'])
+  })
+
+  it('orders shows by when their last episode was added, newest first when descending', () =>
+  {
+    const shows = withEpisodeOrder(pool, ['3', '1'])
+    expect([...shows].sort(lightComparator('lastEpisodeAdded', 'desc')).map(i => i.key)).toEqual(['3', '1', '2'])
+    expect([...shows].sort(lightComparator('lastEpisodeAdded', 'asc')).map(i => i.key)).toEqual(['2', '1', '3'])
+  })
+
+  it('falls back to date added for items without an episode order', () =>
+  {
+    expect([...pool].sort(lightComparator('lastEpisodeAdded', 'desc')).map(i => i.key)).toEqual(['1', '3', '2'])
+  })
+})
+
+describe('withEpisodeOrder', () =>
+{
+  it('ranks items by their place in Plex\'s order and leaves the pool alone', () =>
+  {
+    expect(withEpisodeOrder(pool, ['3', '1']).map(i => [i.key, i.episodeOrder])).toEqual([['1', 1], ['2', 0], ['3', 2]])
+    expect(pool.every(i => i.episodeOrder === undefined)).toBe(true)
+  })
+})
+
+describe('plexSortParam', () =>
+{
+  it('maps each sort to its Plex field', () =>
+  {
+    expect(plexSortParam('recentlyAdded', 'desc', 'movie')).toBe('addedAt:desc')
+    expect(plexSortParam(undefined, undefined, 'movie')).toBe('titleSort:asc')
+    expect(plexSortParam('lastEpisodeAdded', 'desc', 'show')).toBe('episode.addedAt:desc')
+  })
+
+  it('sorts movies by date added when asked for the last episode', () =>
+  {
+    expect(plexSortParam('lastEpisodeAdded', 'desc', 'movie')).toBe('addedAt:desc')
   })
 })
 

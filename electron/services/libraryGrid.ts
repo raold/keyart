@@ -13,6 +13,8 @@ export interface LightItem
   thumb?: string
   addedAt: number
   lastViewedAt: number
+  /** Place in Plex's last-episode-added order, higher is newer; set only for that sort. */
+  episodeOrder?: number
   tmdbId?: string
   tvdbId?: string
   imdbId?: string
@@ -75,10 +77,51 @@ export function lightComparator(sort: LibrarySort = 'title', dir: SortDir = 'asc
       case 'recentlyAdded': d = a.addedAt - b.addedAt; break
       case 'year': d = (a.year ?? 0) - (b.year ?? 0); break
       case 'lastPlayed': d = a.lastViewedAt - b.lastViewedAt; break
+      case 'lastEpisodeAdded':
+        d = a.episodeOrder !== undefined && b.episodeOrder !== undefined ? a.episodeOrder - b.episodeOrder : a.addedAt - b.addedAt
+        break
       default: d = a.titleSort.localeCompare(b.titleSort)
     }
     return mul * d || a.titleSort.localeCompare(b.titleSort)
   }
+}
+
+/** Plex `sort` field for each Library Browser sort option. */
+const PLEX_SORT_FIELD: Record<LibrarySort, string> = {
+  recentlyAdded: 'addedAt',
+  title: 'titleSort',
+  year: 'year',
+  lastPlayed: 'lastViewedAt',
+  lastEpisodeAdded: 'episode.addedAt',
+}
+
+/**
+ * Builds a Plex `sort=field:dir` param from the Library Browser sort choice.
+ * Movies have no episodes, so the last-episode sort orders them by date added.
+ *
+ * @param sort - Grid sort field.
+ * @param dir - Sort direction.
+ * @param libType - Section type.
+ * @returns The param value.
+ */
+export function plexSortParam(sort: LibrarySort | undefined, dir: SortDir | undefined, libType: 'movie' | 'show'): string
+{
+  const field = sort === 'lastEpisodeAdded' && libType !== 'show' ? 'addedAt' : PLEX_SORT_FIELD[sort ?? 'title'] ?? 'titleSort'
+  return `${field}:${dir ?? 'asc'}`
+}
+
+/**
+ * Ranks items by their place in Plex's last-episode-added order, for sorting a
+ * filtered pool the way Plex would. Items missing from the order rank last.
+ *
+ * @param pool - Light items; not modified.
+ * @param newestFirst - Show keys as Plex sorts them by `episode.addedAt:desc`.
+ * @returns Copies carrying `episodeOrder`.
+ */
+export function withEpisodeOrder(pool: LightItem[], newestFirst: string[]): LightItem[]
+{
+  const rank = new Map(newestFirst.map((key, i) => [key, newestFirst.length - i]))
+  return pool.map(it => ({ ...it, episodeOrder: rank.get(it.key) ?? 0 }))
 }
 
 /**

@@ -36,10 +36,13 @@ const SORT_LABEL: Record<LibrarySort, string> = {
   title: 'Title',
   year: 'Release Year',
   lastPlayed: 'Last Played',
+  lastEpisodeAdded: 'Last Episode Added',
 }
 /** Collections only support title / date-added ordering. */
 const COLLECTION_SORTS: LibrarySort[] = ['recentlyAdded', 'title']
 const ALL_SORTS: LibrarySort[] = ['recentlyAdded', 'title', 'year', 'lastPlayed']
+/** TV libraries can also order shows by their newest episode. */
+const SHOW_SORTS: LibrarySort[] = ['recentlyAdded', 'lastEpisodeAdded', 'title', 'year', 'lastPlayed']
 /** Sentinel activeKey for the movie-collections browser tab. */
 const COLLECTIONS_TAB_KEY = '__collections__'
 
@@ -491,8 +494,10 @@ function MyLibraryView({ targetSection, targetItem }: { targetSection: string | 
 
   // Collections only support a subset of sorts; coerce the shown value so the
   // dropdown never displays an option it isn't offering on that tab.
-  const sortList = isCollectionsView ? COLLECTION_SORTS : ALL_SORTS
-  const shownSort: LibrarySort = sortList.includes(sort) ? sort : 'title'
+  const showsInView = isGlobalSearch || sections.find(s => s.key === activeKey)?.type === 'show'
+  const sortList = isCollectionsView ? COLLECTION_SORTS : showsInView ? SHOW_SORTS : ALL_SORTS
+  // Movies and collections order the last-episode sort by date added (see plexSortParam).
+  const shownSort: LibrarySort = sortList.includes(sort) ? sort : sort === 'lastEpisodeAdded' ? 'recentlyAdded' : 'title'
   function changeSort(next: LibrarySort) {
     setSort(next)
     window.api.config.set({ librarySort: next }).catch(() => {})

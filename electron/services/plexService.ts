@@ -4,7 +4,7 @@ import { ConfigService } from './config'
 import { AnimeMappingService } from './animeMappingService'
 import { appliedByItem, scheduleCoverage } from './scheduleUtils'
 import { normTitle, pickLibraryMatch } from './libraryMatch'
-import { applyGridQuery, historyKeysFor, needsHistoryOnly, toLightItem, type LightItem } from './libraryGrid'
+import { applyGridQuery, historyKeysFor, needsHistoryOnly, plexSortParam, toLightItem, withEpisodeOrder, type LightItem } from './libraryGrid'
 import { ShowStatusService, type ShowStatus } from './showStatusService'
 import type {
   ConnectReq, ConnectRes, Library,
@@ -15,20 +15,6 @@ import type {
   CurrentArtReq, CurrentArtRes, PlexArtSlot,
   LibrarySort, SortDir,
 } from '../ipc/types'
-
-/** Plex `sort` field for each Library Browser sort option. */
-const PLEX_SORT_FIELD: Record<LibrarySort, string> = {
-  recentlyAdded: 'addedAt',
-  title: 'titleSort',
-  year: 'year',
-  lastPlayed: 'lastViewedAt',
-}
-
-/** Builds a Plex `sort=field:dir` param from the Library Browser sort choice. */
-function plexSortParam(sort?: LibrarySort, dir?: SortDir): string {
-  const field = PLEX_SORT_FIELD[sort ?? 'title'] ?? 'titleSort'
-  return `${field}:${dir ?? 'asc'}`
-}
 
 interface PlexConnection {
   baseUrl: string
@@ -45,9 +31,10 @@ let _conn: PlexConnection | null = null
  * of its full size.
  */
 const LIGHT_QUERY = 'excludeElements=Media,Genre,Country,Role,Director,Writer,Producer,Collection,Label,Field,Image,UltraBlurColors,Location,Extras,Chapter,Marker&excludeFields=summary,tagline,theme,art,banner'
-/** Light section reads and recent-episode scans, keyed by section. */
+/** Light section reads, recent-episode scans and last-episode orders, keyed by section. */
 const _lightSections = new Map<string, { at: number; items: LightItem[] }>()
 const _recentShows = new Map<string, { at: number; keys: Set<string> }>()
+const _episodeOrder = new Map<string, { at: number; keys: string[] }>()
 const FILTER_CACHE_MS = 5 * 60_000
 /** A show counts as still airing when an episode aired within this window. */
 const AIRING_WINDOW_DAYS = 365
@@ -168,6 +155,26 @@ async function readSectionLight(baseUrl: string, token: string, sectionKey: stri
   const items = (data?.MediaContainer?.Metadata ?? []).map(m => ({ ...toLightItem(m), ...extractGuids(m) }))
   _lightSections.set(sectionKey, { at: Date.now(), items })
   return items
+}
+
+/**
+ * Reads a TV section's show keys in Plex's last-episode-added order, newest
+ * first, cached per section. Show entries carry no episode dates, so a
+ * filtered grid sorts by this order instead.
+ *
+ * @param baseUrl - Server base URL.
+ * @param token - Plex auth token.
+ * @param sectionKey - TV library section key.
+ * @param fresh - Bypass the cache.
+ * @returns Show rating keys, newest last episode first.
+ */
+async function readEpisodeOrder(baseUrl: string, token: string, sectionKey: string, fresh?: boolean): Promise<string[]> {
+  const cached = _episodeOrder.get(sectionKey)
+  if (!fresh && cached && Date.now() - cached.at < FILTER_CACHE_MS) return cached.keys
+  const data = await plexFetch(baseUrl, token, `/library/sections/${sectionKey}/all?type=2&sort=episode.addedAt:desc&${LIGHT_QUERY}`) as { MediaContainer?: { Metadata?: Array<{ ratingKey?: string | number }> } }
+  const keys = (data?.MediaContainer?.Metadata ?? []).filter(m => m.ratingKey != null).map(m => String(m.ratingKey))
+  _episodeOrder.set(sectionKey, { at: Date.now(), keys })
+  return keys
 }
 
 /**
@@ -660,7 +667,7 @@ export const PlexService = {
     }
 
     const mul = req.sortDir === 'desc' ? -1 : 1
-    if (req.sort === 'recentlyAdded') {
+    if (req.sort === 'recentlyAdded' || req.sort === 'lastEpisodeAdded') {
       all.sort((a, b) => mul * ((addedAt.get(a) ?? 0) - (addedAt.get(b) ?? 0)))
     } else {
       all.sort((a, b) => mul * a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }))
@@ -910,10 +917,11 @@ export const PlexService = {
       .map(l => ({ key: l.key, title: l.title, type: l.type as 'movie' | 'show' }))
   },
 
-  /** Drops the cached light section reads and recent-episode scans used by grid filters. */
+  /** Drops the cached light section reads, recent-episode scans and last-episode orders used by grid filters. */
   clearGridCaches(): void {
     _lightSections.clear()
     _recentShows.clear()
+    _episodeOrder.clear()
   },
 
   /**
@@ -953,9 +961,12 @@ export const PlexService = {
       const cfg = ConfigService.get()
       const byItem = appliedByItem(cfg.appliedPosters ?? [])
       const coverage = scheduleCoverage(cfg.scheduledJobs ?? [])
-      const pool = needsHistoryOnly(req.artFilter)
+      const candidates = needsHistoryOnly(req.artFilter)
         ? await readItemsLight(baseUrl, token, historyKeysFor(req.artFilter, byItem, coverage), lib.key)
         : await readSectionLight(baseUrl, token, lib.key, libType, req.fresh)
+      const pool = req.sort === 'lastEpisodeAdded' && libType === 'show'
+        ? withEpisodeOrder(candidates, await readEpisodeOrder(baseUrl, token, lib.key, req.fresh))
+        : candidates
       let showStatus: Map<string, ShowStatus> | undefined
       if (status) {
         const recent = await readRecentShowKeys(baseUrl, token, lib.key, req.fresh)
@@ -980,7 +991,7 @@ export const PlexService = {
       includeGuids: '1',
       'X-Plex-Container-Start': String(req.offset),
       'X-Plex-Container-Size': String(req.limit),
-      sort: plexSortParam(req.sort, req.sortDir),
+      sort: plexSortParam(req.sort, req.sortDir, libType),
     })
     if (req.search?.trim()) params.set('title', req.search.trim())
     const data = await plexFetch(
