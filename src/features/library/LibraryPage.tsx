@@ -15,12 +15,14 @@ import { useCreatorPrefs, parseCreatorInput, type CreatorState } from '../../uti
 import { arrangeSets, uploaderValue } from '../../utils/librarySets'
 import { recordApplied, recordAppliedBatch, recordAppliedQuietly, appliedKey, loadAppliedIndex, type AppliedIndex } from '../../utils/appliedTracker'
 import { applyError, applyPosters, type ApplyState } from '../../utils/applyPosters'
+import { GROUP_LABEL, keptSeasonsNote, missingSeasons, planMix, postersInGroup, setCompleteness, setGroups, type ArtMix } from '../../utils/artMix'
 import { uuid } from '../../utils/uuid'
 import { errorMessage } from '../../utils/errorMessage'
 import {
-  DEFAULT_QUICK_CRON, appliedUploaders, coveringJob, creatorSyncUrl, describeCron, describeQuickSync, planQuickSync, scheduleCoverage,
-  type AppliedUploader,
+  ART_GROUPS, DEFAULT_QUICK_CRON, appliedUploaders, coveringJob, creatorSyncUrl, describeCron, describeQuickSync, planQuickSync, scheduleCoverage,
+  type AppliedUploader, type ArtGroup,
 } from '../../../electron/services/scheduleUtils'
+import MixTray, { type MixSlot } from './MixTray'
 import { useAppContext } from '../../app/AppContext'
 import { useNavStore } from '../../app/navStore'
 import type {
@@ -916,7 +918,12 @@ function SetsPanel({ item, onClose, onItemPoster }: {
   const [memberInLib, setMemberInLib] = useState<Map<string, boolean>>(new Map())
   // The sets memberInLib was resolved for; Apply waits while it lags behind `sets`.
   const [checkedSets, setCheckedSets] = useState<PosterSetSummary[] | null>(null)
-  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set() })
+  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set(), owners: new Map() })
+  // A show's art picked group by group from different sets, applied together from the tray.
+  const [mix, setMix] = useState<ArtMix>({})
+  const [mixApply, setMixApply] = useState<ApplyState | undefined>(undefined)
+  // The item on screen, so an Apply mix that outlives it leaves the next item's tray alone.
+  const itemKeyRef = useRef(item.key)
   const [schedJobs, setSchedJobs] = useState<ScheduledJob[]>([])
   const [quickCron, setQuickCron] = useState(DEFAULT_QUICK_CRON)
   const [schedulingId, setSchedulingId] = useState<string | null>(null)
@@ -949,6 +956,9 @@ function SetsPanel({ item, onClose, onItemPoster }: {
     setApplyMap({})
     setCollectionScope({})
     setSchedulingId(null)
+    setMix({})
+    setMixApply(undefined)
+    itemKeyRef.current = item.key
     panelBodyRef.current?.scrollTo({ top: 0 })
   }, [item.key])
 
@@ -958,6 +968,11 @@ function SetsPanel({ item, onClose, onItemPoster }: {
     : appliedIdx.titles.has(appliedKey(item.title, item.year))
 
   useEffect(() => { loadAppliedIndex().then(setAppliedIdx) }, [])
+
+  // Re-reads history after a write, so group ownership matches what was saved.
+  function refreshAppliedIdx() {
+    loadAppliedIndex().then(setAppliedIdx).catch(() => { /* the optimistic index stays */ })
+  }
 
   // Scheduled jobs, kept live so the Scheduled tags follow edits made elsewhere.
   useEffect(() => {
@@ -1359,7 +1374,9 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           posterUrls: new Set([...prev.posterUrls, ...appliedUrls]),
           currentByItem: records.reduce((map, r) => map.set(r.itemKey, sKey), new Map(prev.currentByItem)),
           currentPosterUrls: new Set([...prev.currentPosterUrls, ...appliedUrls]),
+          owners: prev.owners,
         }))
+        if (!historyError) refreshAppliedIdx()
         bumpArtReload()
       }
       setApplyMap(m => ({
@@ -1465,13 +1482,116 @@ function SetsPanel({ item, onClose, onItemPoster }: {
         posterUrls: new Set([...prev.posterUrls, ...appliedUrls]),
         currentByItem: records.reduce((map, r) => map.set(r.itemKey, sKey), new Map(prev.currentByItem)),
         currentPosterUrls: new Set([...prev.currentPosterUrls, ...appliedUrls]),
+        owners: prev.owners,
       }))
+      if (!historyError) refreshAppliedIdx()
       bumpArtReload()
     }
     setApplyMap(m => ({
       ...m,
       [sKey]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, skipped: totalSkipped, error: applyError(totalFailed, historyError, totalSkipped) },
     }))
+  }
+
+  // -- Mixing a show's art from several sets (shows only) --
+  const isShow = item.type === 'show'
+  const owners = appliedIdx.owners.get(item.key)
+  // The groups each set has art for. Chips ignore the file-type filter.
+  const groupsBySet = useMemo(() => {
+    const map = new Map<string, ArtGroup[]>()
+    if (isShow) for (const s of sets) map.set(setKey(s), setGroups(s.posters))
+    return map
+  }, [sets, isShow])
+  const mixing = isShow && ART_GROUPS.some(g => mix[g])
+  const mixRunning = mixApply?.status === 'applying'
+  const anyApplying = mixRunning || Object.values(applyMap).some(a => a.status === 'applying')
+  const findSet = (key: string | undefined) => key ? sets.find(s => setKey(s) === key) : undefined
+
+  /** Picks a set for a group, or drops the pick when that set already has it. */
+  function pickGroup(group: ArtGroup, sKey: string) {
+    if (mixRunning) return
+    setMixApply(undefined)
+    setMix(m => {
+      const next = { ...m }
+      if (next[group] === sKey) delete next[group]
+      else next[group] = sKey
+      return next
+    })
+  }
+
+  function clearMix() {
+    setMix({})
+    setMixApply(undefined)
+  }
+
+  /** One tray slot per group the show's sets offer: the pick, else the current owner, else Plex's own art. */
+  function mixSlots(): MixSlot[] {
+    const offered = new Set([...groupsBySet.values()].flat())
+    return ART_GROUPS.filter(g => offered.has(g)).map(group => {
+      const label = GROUP_LABEL[group]
+      const picked = findSet(mix[group])
+      const owner = owners?.[group]
+      const first = postersInGroup((picked ?? findSet(owner?.setKey))?.posters ?? [], group)[0]
+      const thumb = first ? (first.thumbUrl ?? first.url) : group === 'poster' ? owner?.thumb : undefined
+      if (picked) return { group, label, thumb, creator: picked.uploader, change: owner?.setKey !== setKey(picked) }
+      if (!owner) return { group, label, change: false }
+      const creator = owner.uploader ?? (owner.setKey ? `${SOURCE_LABEL[owner.source]} set` : 'Your upload')
+      return { group, label, thumb, creator, change: false }
+    })
+  }
+
+  // Seasons in Plex that the picked seasons set has no poster for keep what they have.
+  const seasonsPick = findSet(mix.seasons)
+  const seasonsCompleteness = seasonsPick && setCompleteness(
+    seasonsPick.posters,
+    artSlots.flatMap(a => a.kind === 'season' && typeof a.season === 'number' ? [{ season: a.season }] : []),
+  )
+  const mixNote = seasonsCompleteness ? keptSeasonsNote(missingSeasons(seasonsCompleteness)) : undefined
+
+  // The title cards' set only adds cards for new episodes while a job syncs it.
+  const cardsSet = findSet(mix.cards ?? owners?.cards?.setKey)
+  const cardsHint = cardsSet && !coveringJob(coverage, cardsSet.id, cardsSet.uploader, cardsSet.source)
+    ? { creator: cardsSet.uploader, onSchedule: () => scheduleSet(cardsSet) }
+    : undefined
+
+  async function applyMix() {
+    const plan = planMix(mix, sets, owners)
+    if (!plan.length || anyApplying) return
+    const startKey = item.key
+    const onScreen = () => itemKeyRef.current === startKey
+    const enabled = new Set(ALL_TYPES)
+    const total = plan.reduce((n, e) => n + e.posters.length, 0)
+    setMixApply({ status: 'applying', done: 0, total })
+
+    let totalDone = 0, totalFailed = 0, totalSkipped = 0
+    const records: AppliedRecord[] = []
+    const bump = (d: number) => { if (onScreen()) setMixApply({ status: 'applying', done: totalDone + d, total }) }
+
+    for (const { set: s, posters } of plan) {
+      const res = await applyPosters(item.key, posters, enabled, bump)
+      totalDone += res.done; totalFailed += res.failed; totalSkipped += res.skipped
+      if (res.done === 0) continue
+      // One record per set; its slots claim the groups it filled (see mergeAppliedRecords).
+      records.push({
+        itemKey: item.key, title: item.title, year: item.year, type: item.type,
+        source: s.source, thumb: mainThumb(postersInGroup(s.posters, 'poster')) ?? item.thumb, setId: s.id, uploader: s.uploader,
+        posterUrls: res.appliedUrls, slots: res.appliedSlots, appliedAt: new Date().toISOString(),
+      })
+      const posterThumb = res.appliedSlots.includes('poster') ? mainThumb(posters) : undefined
+      if (posterThumb) onItemPoster(item.key, posterThumb)
+    }
+
+    let historyError: string | undefined
+    if (records.length > 0) {
+      historyError = await recordAppliedBatch(records).then(() => undefined, (err: unknown) => errorMessage(err))
+      if (!historyError) refreshAppliedIdx()
+      bumpArtReload()
+    }
+    if (!onScreen()) return
+    const error = applyError(totalFailed, historyError, totalSkipped)
+    // A clean apply closes the tray; anything worth reporting keeps it open.
+    if (!error) clearMix()
+    else setMixApply({ status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total, skipped: totalSkipped, error })
   }
 
   return (
@@ -1779,6 +1899,10 @@ function SetsPanel({ item, onClose, onItemPoster }: {
                 }))
                 setApplyMap(m => { const next = { ...m }; delete next[sKey]; return next })
               } : undefined}
+              groupChips={isShow
+                ? (groupsBySet.get(sKey) ?? []).map(group => ({ group, picked: mix[group] === sKey, owned: owners?.[group]?.setKey === sKey }))
+                : undefined}
+              onPickGroup={isShow && !mixRunning ? group => pickGroup(group, sKey) : undefined}
             />
           )
         })}
@@ -1794,6 +1918,23 @@ function SetsPanel({ item, onClose, onItemPoster }: {
           </button>
         )}
         </motion.div>
+
+        {/* Sticks to the bottom while the sets scroll under it, and takes its own
+            room at the end of the list, so the last row always scrolls clear. */}
+        <AnimatePresence>
+          {mixing && (
+            <MixTray
+              key="mix"
+              slots={mixSlots()}
+              note={mixNote}
+              apply={mixApply}
+              disabled={anyApplying || planMix(mix, sets, owners).length === 0}
+              onApply={applyMix}
+              onClear={clearMix}
+              cardsHint={cardsHint}
+            />
+          )}
+        </AnimatePresence>
       </div>
     </motion.div>
   )
@@ -1822,7 +1963,7 @@ function ThumbButton({ url, label, episode, onClick }: { url: string; label: str
 }
 
 /** Expandable card for one poster set: preview, uploader, source, counts, apply state, and grouped posters. */
-function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, badge, disabled, creator = 'none', onCreatorChange, showSource, large, selectable, checked, onToggleSelect, onSchedule, scheduledBy, onOpenSchedule, scheduleHint, scheduleError, scheduling, collectionMovies, collectionTotal, hasCollectionArt, applyScope, scopeContext, onApplyScopeChange }: {
+function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, badge, disabled, creator = 'none', onCreatorChange, showSource, large, selectable, checked, onToggleSelect, onSchedule, scheduledBy, onOpenSchedule, scheduleHint, scheduleError, scheduling, collectionMovies, collectionTotal, hasCollectionArt, applyScope, scopeContext, onApplyScopeChange, groupChips, onPickGroup }: {
   set: PosterSetSummary
   apply?: ApplyState
   onApply: () => void
@@ -1870,6 +2011,10 @@ function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, ba
   /** Whether scope labels refer to a Plex Collection or a single movie. */
   scopeContext?: 'movie' | 'collection'
   onApplyScopeChange?: (patch: Partial<SetApplyScope>) => void
+  /** A show's art groups this set has: whether each is picked for the mix and whether this set fills it on the show now. */
+  groupChips?: { group: ArtGroup; picked: boolean; owned: boolean }[]
+  /** Picks this set for a group in the mix, or drops the pick; omit to lock the chips. */
+  onPickGroup?: (group: ArtGroup) => void
 }) {
   const [err, setErr]               = useState(false)
   const [previewLoaded, setPreviewLoaded] = useState(false)
@@ -1998,6 +2143,30 @@ function SetCard({ set, apply, onApply, checkingLibrary, enabledTypes, title, ba
             {enabledTypes.has('title_card') && set.titleCardCount > 0 && <span className={styles.countBadge}>{set.titleCardCount} card{set.titleCardCount !== 1 ? 's' : ''}</span>}
             {enabledTypes.has('backdrop')   && set.backdropCount > 0  && <span className={styles.countBadge}>{set.backdropCount} backdrop{set.backdropCount !== 1 ? 's' : ''}</span>}
           </div>
+
+          {groupChips && groupChips.length > 0 && (
+            <div className={styles.groupChips} role="group" aria-label="Pick for your mix">
+              {groupChips.map(c => {
+                const label = GROUP_LABEL[c.group]
+                const action = c.picked ? 'Remove from your mix' : `Pick this set's ${label.toLowerCase()} for your mix`
+                return (
+                  <button
+                    key={c.group}
+                    type="button"
+                    className={`${styles.groupChip} ${c.picked ? styles.groupChipPicked : ''} ${c.owned ? styles.groupChipOwned : ''}`}
+                    aria-pressed={c.picked}
+                    disabled={!onPickGroup}
+                    onClick={() => onPickGroup?.(c.group)}
+                    title={c.owned ? `${action} (on the show now)` : action}
+                  >
+                    {c.owned && <Check size={10} className={styles.groupChipCheck} aria-hidden="true" />}
+                    {label}
+                    {c.owned && <span className={styles.srOnly}> (on the show now)</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
 
           <div className={styles.setActions}>
             {status === 'idle' && (
@@ -2221,7 +2390,7 @@ function FileTile({ poster, set, st, done, error, onLightbox, onApply }: {
 function CreatorsView({ initialCreator }: { initialCreator: string | null }) {
   const { prefs, stateOf, setState } = useCreatorPrefs()
   const subs = prefs.mediuxFollows
-  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set() })
+  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set(), owners: new Map() })
   // The creator picked in the rail (or via a clicked badge); until one is,
   // the first followed creator is shown.
   const [picked, setActive]   = useState<string | null>(null)
@@ -2380,6 +2549,7 @@ function CreatorsView({ initialCreator }: { initialCreator: string | null }) {
               posterUrls: new Set([...prev.posterUrls, ...urls]),
               currentByItem: new Map(prev.currentByItem).set(itemKey, sKey),
               currentPosterUrls: new Set([...prev.currentPosterUrls, ...urls]),
+              owners: prev.owners,
             }))}
           />
         ) : (

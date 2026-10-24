@@ -4,6 +4,7 @@ import type { ArtOwner } from '../../electron/services/scheduleUtils'
 import {
   completenessScore,
   describeCompleteness,
+  keptSeasonsNote,
   missingSeasons,
   planMix,
   postersInGroup,
@@ -497,5 +498,30 @@ describe('missingSeasons', () =>
   {
     const c = setCompleteness([season1, season2], [{ season: 0, episodes: 2 }, { season: 1, episodes: 8 }, { season: 2, episodes: 8 }, { season: 3, episodes: 8 }])
     expect(c && missingSeasons(c)).toEqual([3])
+  })
+})
+
+describe('keptSeasonsNote', () =>
+{
+  it('says nothing when no season is left out', () =>
+  {
+    expect(keptSeasonsNote([])).toBeUndefined()
+  })
+
+  it('names a single season', () =>
+  {
+    expect(keptSeasonsNote([5])).toBe('Season 5 keeps its current poster')
+  })
+
+  it('lists a few seasons', () =>
+  {
+    expect(keptSeasonsNote([5, 6])).toBe('Seasons 5 and 6 keep their current posters')
+    expect(keptSeasonsNote([2, 5, 6])).toBe('Seasons 2, 5 and 6 keep their current posters')
+  })
+
+  it('shortens three or more seasons in a row to a range', () =>
+  {
+    expect(keptSeasonsNote(range(3, 12))).toBe('Seasons 3-12 keep their current posters')
+    expect(keptSeasonsNote([1, 4, 5, 6, 9])).toBe('Seasons 1, 4-6 and 9 keep their current posters')
   })
 })

@@ -24,6 +24,14 @@ export function setGroups(posters: PosterInfo[]): ArtGroup[] {
   return ART_GROUPS.filter(g => postersInGroup(posters, g).length > 0)
 }
 
+/** What each art group is called on screen. */
+export const GROUP_LABEL: Record<ArtGroup, string> = {
+  poster: 'Poster',
+  seasons: 'Seasons',
+  cards: 'Title cards',
+  backdrop: 'Backdrop',
+}
+
 /** The set picked for each art group, as the set's {@link setKey}. */
 export type ArtMix = Partial<Record<ArtGroup, string>>
 
@@ -164,4 +172,27 @@ export function completenessScore(c: Completeness): number {
 export function missingSeasons(c: Completeness): number[] {
   const have = new Set(c.seasonsHave)
   return c.seasonsInLibrary.filter(s => s >= 1 && !have.has(s)).sort((a, b) => a - b)
+}
+
+/**
+ * Tells which seasons a mix leaves alone because the chosen set has no poster
+ * for them. Three or more seasons in a row are written as a range.
+ *
+ * @param seasons - The seasons left out, ascending and distinct (see {@link missingSeasons}).
+ * @returns For example "Season 5 keeps its current poster", or undefined when none is left out.
+ */
+export function keptSeasonsNote(seasons: number[]): string | undefined {
+  if (!seasons.length) return undefined
+  if (seasons.length === 1) return `Season ${seasons[0]} keeps its current poster`
+  const parts: string[] = []
+  for (let i = 0; i < seasons.length; i++) {
+    let end = i
+    while (seasons[end + 1] === seasons[end] + 1) end++
+    if (end - i >= 2) {
+      parts.push(`${seasons[i]}-${seasons[end]}`)
+      i = end
+    } else parts.push(`${seasons[i]}`)
+  }
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+  return `Seasons ${list} keep their current posters`
 }
