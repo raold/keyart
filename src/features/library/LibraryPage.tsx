@@ -14,10 +14,11 @@ import { groupPosters, posterFileType, setKey, setScopeReady, ALL_TYPES, SOURCE_
 import { useCreatorPrefs, parseCreatorInput, type CreatorState } from '../../utils/creatorPrefs'
 import { arrangeSets, uploaderValue } from '../../utils/librarySets'
 import { recordApplied, recordAppliedBatch, recordAppliedQuietly, appliedKey, loadAppliedIndex, type AppliedIndex } from '../../utils/appliedTracker'
+import { applyError, applyPosters, type ApplyState } from '../../utils/applyPosters'
 import { uuid } from '../../utils/uuid'
 import { errorMessage } from '../../utils/errorMessage'
 import {
-  DEFAULT_QUICK_CRON, appliedUploaders, coveringJob, creatorSyncUrl, describeCron, describeQuickSync, planQuickSync, posterSlot, scheduleCoverage,
+  DEFAULT_QUICK_CRON, appliedUploaders, coveringJob, creatorSyncUrl, describeCron, describeQuickSync, planQuickSync, scheduleCoverage,
   type AppliedUploader,
 } from '../../../electron/services/scheduleUtils'
 import { useAppContext } from '../../app/AppContext'
@@ -173,54 +174,6 @@ function timeAgo(ts: number): string {
   const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`
   const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`
   return `${Math.floor(h / 24)}d ago`
-}
-
-/** Apply progress for a single set. */
-interface ApplyState { status: 'idle' | 'applying' | 'done' | 'error'; done: number; total: number; error?: string }
-
-/**
- * Error text for a finished apply: upload failures first, then a failure to
- * save the history that drives the Applied badges and filters.
- *
- * @param failed - Posters that failed to upload.
- * @param historyError - Why the history write failed, if it did.
- * @returns The text, or undefined when everything went through.
- */
-function applyError(failed: number, historyError?: string): string | undefined {
-  const parts: string[] = []
-  if (failed) parts.push(`${failed} failed`)
-  if (historyError) parts.push(`history not saved: ${historyError}`)
-  return parts.length ? parts.join(' · ') : undefined
-}
-
-/**
- * Applies a set's posters to a Plex target, routing each by season/episode.
- *
- * @param targetKey - Plex ratingKey to apply onto.
- * @param posters - Candidate posters; filtered by the enabled types.
- * @param enabled - File types the user has switched on.
- * @param onProgress - Called after each poster with done/total counts.
- * @returns Done/failed counts, the URLs and slots actually applied, and the last error.
- */
-async function applyPosters(
-  targetKey: string,
-  posters: PosterInfo[],
-  enabled: Set<FileType>,
-  onProgress: (done: number, total: number) => void,
-): Promise<{ done: number; failed: number; total: number; appliedUrls: string[]; appliedSlots: string[]; lastError?: string }> {
-  const list = posters.filter(p => enabled.has(posterFileType(p)))
-  let done = 0, failed = 0
-  const appliedUrls: string[] = []
-  const appliedSlots: string[] = []
-  let lastError: string | undefined
-  for (const p of list) {
-    try {
-      const res = await window.api.plex.uploadPoster(targetKey, p.url, p.source, p.season, p.episode, p.isCollection) as { success: boolean; error?: string }
-      if (res.success) { done++; appliedUrls.push(p.url); appliedSlots.push(posterSlot(p)) } else { failed++; lastError = res.error }
-    } catch (err) { failed++; lastError = err instanceof Error ? err.message : String(err) }
-    onProgress(done, list.length)
-  }
-  return { done, failed, total: list.length, appliedUrls, appliedSlots, lastError }
 }
 
 /** Lets any nested set card jump to a creator in the Creators tab. */
@@ -1353,7 +1306,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
       if (enabledTotal === 0) return
       setApplyMap(m => ({ ...m, [sKey]: { status: 'applying', done: 0, total: enabledTotal } }))
 
-      let totalDone = 0, totalFailed = 0
+      let totalDone = 0, totalFailed = 0, totalSkipped = 0
       const records: AppliedRecord[] = []
       const bump = (d: number) =>
         setApplyMap(m => ({ ...m, [sKey]: { status: 'applying', done: totalDone + d, total: enabledTotal } }))
@@ -1369,7 +1322,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
         }
         for (const { child, posters } of movieMap.values()) {
           const memberRes = await applyPosters(child.key, posters, types, bump)
-          totalDone += memberRes.done; totalFailed += memberRes.failed
+          totalDone += memberRes.done; totalFailed += memberRes.failed; totalSkipped += memberRes.skipped
           if (memberRes.done > 0) {
             const thumb = mainThumb(posters)
             records.push({
@@ -1384,7 +1337,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
 
       if (applyCollArt) {
         const collRes = await applyPosters(item.key, effectiveCollArt, types, bump)
-        totalDone += collRes.done; totalFailed += collRes.failed
+        totalDone += collRes.done; totalFailed += collRes.failed; totalSkipped += collRes.skipped
         if (collRes.done > 0) {
           const thumb = mainThumb(effectiveCollArt) ?? item.thumb
           records.push({
@@ -1411,7 +1364,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
       }
       setApplyMap(m => ({
         ...m,
-        [sKey]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, error: applyError(totalFailed, historyError) },
+        [sKey]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, skipped: totalSkipped, error: applyError(totalFailed, historyError, totalSkipped) },
       }))
       return
     }
@@ -1438,14 +1391,14 @@ function SetsPanel({ item, onClose, onItemPoster }: {
     if (enabledTotal === 0) return
     setApplyMap(m => ({ ...m, [sKey]: { status: 'applying', done: 0, total: enabledTotal } }))
 
-    let totalDone = 0, totalFailed = 0
+    let totalDone = 0, totalFailed = 0, totalSkipped = 0
     const records: AppliedRecord[] = []
     const bump = (d: number) =>
       setApplyMap(m => ({ ...m, [sKey]: { status: 'applying', done: totalDone + d, total: enabledTotal } }))
 
     // 1. The viewed item's own art.
     const mainRes = await applyPosters(item.key, viewedPosters, types, bump)
-    totalDone += mainRes.done; totalFailed += mainRes.failed
+    totalDone += mainRes.done; totalFailed += mainRes.failed; totalSkipped += mainRes.skipped
     if (mainRes.done > 0) {
       const thumb = mainThumb(viewedPosters)
       records.push({
@@ -1470,7 +1423,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
         // Not in the library - skip quietly rather than reporting a failure.
         if (!found) continue
         const memberRes = await applyPosters(found.key, m.posters, types, bump)
-        totalDone += memberRes.done; totalFailed += memberRes.failed
+        totalDone += memberRes.done; totalFailed += memberRes.failed; totalSkipped += memberRes.skipped
         if (memberRes.done > 0) {
           const thumb = mainThumb(m.posters)
           records.push({
@@ -1490,7 +1443,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
       // No matching Plex Collection object - skip quietly (the movies still applied).
       if (coll) {
         const collRes = await applyPosters(coll.key, collectionArt, types, bump)
-        totalDone += collRes.done; totalFailed += collRes.failed
+        totalDone += collRes.done; totalFailed += collRes.failed; totalSkipped += collRes.skipped
         if (collRes.done > 0) {
           records.push({
             itemKey: coll.key, title: coll.title, type: 'collection',
@@ -1517,7 +1470,7 @@ function SetsPanel({ item, onClose, onItemPoster }: {
     }
     setApplyMap(m => ({
       ...m,
-      [sKey]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, error: applyError(totalFailed, historyError) },
+      [sKey]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, skipped: totalSkipped, error: applyError(totalFailed, historyError, totalSkipped) },
     }))
   }
 
@@ -2710,7 +2663,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
     const enabledTotal  = s.posters.filter(p => allTypes.has(posterFileType(p))).length
     setApplyMap(m => ({ ...m, [s.id]: { status: 'applying', done: 0, total: enabledTotal } }))
 
-    let totalDone = 0, totalFailed = 0
+    let totalDone = 0, totalFailed = 0, totalSkipped = 0
     const allAppliedUrls: string[] = []
     const allAppliedSlots: string[] = []
 
@@ -2719,6 +2672,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
         (d, _t) => setApplyMap(m => ({ ...m, [s.id]: { status: 'applying', done: totalDone + d, total: enabledTotal } })))
       totalDone   += mainRes.done
       totalFailed += mainRes.failed
+      totalSkipped += mainRes.skipped
       allAppliedUrls.push(...mainRes.appliedUrls)
       allAppliedSlots.push(...mainRes.appliedSlots)
     } else if (mainPosters.length > 0) {
@@ -2732,6 +2686,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
           (d, _t) => setApplyMap(m => ({ ...m, [s.id]: { status: 'applying', done: totalDone + d, total: enabledTotal } })))
         totalDone   += collRes.done
         totalFailed += collRes.failed
+        totalSkipped += collRes.skipped
         allAppliedUrls.push(...collRes.appliedUrls)
         allAppliedSlots.push(...collRes.appliedSlots)
         if (collRes.done > 0) {
@@ -2765,6 +2720,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
           (d, _t) => setApplyMap(mm => ({ ...mm, [s.id]: { status: 'applying', done: totalDone + d, total: enabledTotal } })))
         totalDone   += memberRes.done
         totalFailed += memberRes.failed
+        totalSkipped += memberRes.skipped
         allAppliedUrls.push(...memberRes.appliedUrls)
         allAppliedSlots.push(...memberRes.appliedSlots)
         if (memberRes.done > 0) {
@@ -2790,7 +2746,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
     }
     setApplyMap(m => ({
       ...m,
-      [s.id]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, error: applyError(totalFailed, historyError) },
+      [s.id]: { status: totalFailed && !totalDone ? 'error' : 'done', done: totalDone, total: enabledTotal, skipped: totalSkipped, error: applyError(totalFailed, historyError, totalSkipped) },
     }))
   }
 
@@ -2805,7 +2761,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
         setApplyMap(m => ({ ...m, [key]: { status: 'error', done: 0, total: 1, error: 'No matching Plex Collection' } }))
         return
       }
-      const { done, appliedUrls, appliedSlots, lastError } = await applyPosters(coll.key, [file], allTypes, () => {})
+      const { done, skipped, appliedUrls, appliedSlots, lastError } = await applyPosters(coll.key, [file], allTypes, () => {})
       if (done) {
         void recordAppliedQuietly({
           itemKey: coll.key, title: coll.title, type: 'collection',
@@ -2813,12 +2769,12 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
           posterUrls: appliedUrls, slots: appliedSlots, appliedAt: new Date().toISOString(),
         })
       }
-      setApplyMap(m => ({ ...m, [key]: { status: done ? 'done' : 'error', done, total: 1, error: lastError } }))
+      setApplyMap(m => ({ ...m, [key]: { status: done ? 'done' : 'error', done, total: 1, skipped, error: lastError ?? applyError(0, undefined, skipped) } }))
       return
     }
 
     if (!s.matchedKey) return
-    const { done, appliedUrls, appliedSlots, lastError } = await applyPosters(s.matchedKey, [file], allTypes, () => {})
+    const { done, skipped, appliedUrls, appliedSlots, lastError } = await applyPosters(s.matchedKey, [file], allTypes, () => {})
     if (done) {
       void recordAppliedQuietly({
         itemKey: s.matchedKey, title: s.title, year: s.year, type: s.matchedType ?? 'movie',
@@ -2827,7 +2783,7 @@ function CreatorSets({ username, creator, appliedIdx, onCreatorChange, onApplied
       })
       onApplied(setKey(s), s.matchedKey, s.title, s.year, appliedUrls)
     }
-    setApplyMap(m => ({ ...m, [key]: { status: done ? 'done' : 'error', done, total: 1, error: lastError } }))
+    setApplyMap(m => ({ ...m, [key]: { status: done ? 'done' : 'error', done, total: 1, skipped, error: lastError ?? applyError(0, undefined, skipped) } }))
   }
 
   /**
