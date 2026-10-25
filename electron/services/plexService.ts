@@ -881,7 +881,7 @@ export const PlexService = {
 
     try {
       const seasonData = await plexFetch(baseUrl, token, `/library/metadata/${req.key}/children`) as {
-        MediaContainer?: { Metadata?: Array<{ ratingKey: string; index?: number; thumb?: string }> }
+        MediaContainer?: { Metadata?: Array<{ ratingKey: string; index?: number; thumb?: string; leafCount?: number }> }
       }
       const seasons = (seasonData?.MediaContainer?.Metadata ?? [])
         .slice()
@@ -894,6 +894,7 @@ export const PlexService = {
           thumb: thumbUrl(baseUrl, token, s.thumb),
           kind: 'season',
           season: idx,
+          episodes: s.leafCount,
         })
       }
     } catch {

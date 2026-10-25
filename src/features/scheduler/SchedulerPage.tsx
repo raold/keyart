@@ -103,7 +103,6 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
   const [schedule,    setSchedule]    = useState<ScheduleForm>(() => cronToForm(initial?.cronExpr ?? '0 3 * * *'))
   const [enabled,     setEnabled]     = useState(initial?.enabled ?? true)
   const [skipApplied, setSkipApplied] = useState(initial?.skipApplied !== false)
-  const [fillGaps,    setFillGaps]    = useState(initial?.fillGaps === true)
   const [saving,      setSaving]      = useState(false)
   const [error,       setError]       = useState<string | null>(null)
 
@@ -132,7 +131,6 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
         cronExpr,
         enabled,
         skipApplied,
-        fillGaps,
       }, runAfterSave)
     } catch (err) {
       setError(errorMessage(err))
@@ -363,16 +361,9 @@ function JobForm({ initial, onSave, onClose }: JobFormProps) {
 
           <Switch
             label="Only apply new artwork"
-            description="Skips posters already applied to an item, so each run only adds new uploads and Plex doesn't pile up duplicate copies. Turn off to re-apply the full set every run."
+            description="Skips posters already applied to an item, so each run only adds new uploads and Plex doesn't pile up duplicate copies. Turn off to re-apply this job's own art every run. Art that another set holds on a show (poster, seasons, title cards or backdrop) is always left alone."
             checked={skipApplied}
             onChange={setSkipApplied}
-          />
-
-          <Switch
-            label="Only fill gaps"
-            description="Leaves any poster, season, or episode that other art already covers, whether from another job or applied by hand. Use this for a backup creator that should only add what your main creator is missing."
-            checked={fillGaps}
-            onChange={setFillGaps}
           />
 
           <Switch
@@ -500,8 +491,7 @@ function JobCard({ job, now, starting, canMoveUp, canMoveDown, onEdit, onDelete,
               {job.lastRun && (
                 <><span className={styles.dot} /><span title={new Date(job.lastRun).toLocaleString()}>last ran {relativeTime(job.lastRun, now)}</span></>
               )}
-              {job.skipApplied === false && <><span className={styles.dot} /><span>re-applies everything</span></>}
-              {job.fillGaps && <><span className={styles.dot} /><span>fills gaps only</span></>}
+              {job.skipApplied === false && <><span className={styles.dot} /><span>re-applies its art</span></>}
             </div>
             {isRunning && job.progress && (
               <span className={styles.cardProgress} title={job.progress.current}>{describeProgress(job.progress)}</span>

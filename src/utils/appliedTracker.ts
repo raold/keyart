@@ -1,4 +1,5 @@
 import type { AppliedRecord } from '../../electron/ipc/types'
+import { artOwners, type ArtGroup, type ArtOwner } from '../../electron/services/scheduleUtils'
 import { setKey } from './posterGroups'
 
 /** Identity of the set a record came from, or null for manual uploads. */
@@ -69,6 +70,8 @@ export interface AppliedIndex {
   currentByItem: Map<string, string>
   /** Poster URLs belonging to the current set per item. */
   currentPosterUrls: Set<string>
+  /** itemKey to the set that owns each art group on that item. */
+  owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>
 }
 
 /**
@@ -102,5 +105,6 @@ export async function loadAppliedIndex(): Promise<AppliedIndex> {
     posterUrls: new Set(recs.flatMap(r => r.posterUrls ?? [])),
     currentByItem,
     currentPosterUrls,
+    owners: artOwners(recs),
   }
 }

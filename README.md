@@ -27,6 +27,10 @@ creators update them.
 - **Title mappings.** Point a set at the right title when names don't match.
 - **Reset posters.** Put the original Plex art back for any title.
 
+A show's art comes in four parts: the show poster, the season posters, the episode title cards and the backdrop.
+You can take each part from a different set, right on the set cards, and apply the mix in one go. Keyart remembers
+which set each part came from, so a scheduled set never replaces the parts you took from another.
+
 Posters are matched by TMDB ID, read from each Plex item. For titles Plex stores without one (TVDB or IMDb agents),
 add a free TMDB API key in Settings.
 

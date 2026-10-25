@@ -705,7 +705,6 @@ export function normalizeJob(input: unknown, existing: ScheduledJob | undefined,
     enabled: raw.enabled !== false,
     skipApplied: raw.skipApplied !== false,
   }
-  if (raw.fillGaps === true) job.fillGaps = true
   if (creator) job.creator = creator
   if (existing?.lastRun) job.lastRun = existing.lastRun
   if (existing?.lastStatus) job.lastStatus = existing.lastStatus
@@ -1087,7 +1086,9 @@ export function appliedUrlIndex(records: AppliedRecord[]): Map<string, Set<strin
 /**
  * Merges new applied entries into history. Entries dedupe on item, set and source, the
  * per-poster URLs and slots accumulate, and the newest entries move to the
- * front.
+ * front. Each entry also takes the art groups its slots fill from whichever
+ * set held them, and every record of the item has its `groups` rewritten to
+ * match.
  *
  * @param existing - Current history, newest first.
  * @param incoming - Entries to record.
@@ -1106,7 +1107,10 @@ export function mergeAppliedRecords(existing: AppliedRecord[], incoming: Applied
     const posterUrls = [...new Set([...(prior?.posterUrls ?? []), ...(rec.posterUrls ?? [])])]
     const merged: AppliedRecord = { ...rec, posterUrls }
     if (prior?.slots || rec.slots) merged.slots = [...new Set([...(prior?.slots ?? []), ...(rec.slots ?? [])])]
-    list = [merged, ...list.filter(r => !same(r))]
+    const sameItem = (r: AppliedRecord) => r.itemKey === rec.itemKey
+    const owners = groupOwners(list.filter(sameItem))
+    for (const group of groupsOfSlots(rec.slots)) owners[group] = merged
+    list = [merged, ...list.filter(r => !same(r))].map(r => sameItem(r) ? { ...r, groups: ownedGroups(r, owners) } : r)
   }
   return list.slice(0, cap)
 }
@@ -1125,63 +1129,168 @@ export function posterSlot(p: Pick<PosterInfo, 'season' | 'episode'>): string
   return 'poster'
 }
 
-/** Which sets have filled each slot on each item, for fill-gaps jobs. */
-export interface SlotCoverage
+/** A kind of art an item carries. A set owns an item's art one group at a time. */
+export type ArtGroup = 'poster' | 'seasons' | 'cards' | 'backdrop'
+
+/** Every art group, in display order. */
+export const ART_GROUPS: ArtGroup[] = ['poster', 'seasons', 'cards', 'backdrop']
+
+/**
+ * Sorts a slot into its art group.
+ *
+ * @param slot - Slot from {@link posterSlot}.
+ * @returns seasons for s<n>, cards for s<n>e<n>, backdrop for the backdrop, else poster.
+ */
+export function slotGroup(slot: string): ArtGroup
 {
-  /** Item key to the set keys (empty string when unknown) of slotless records. */
-  whole: Map<string, Set<string>>
-  /** Item key to slot to the set keys that filled it. */
-  slots: Map<string, Map<string, Set<string>>>
+  if (slot === 'backdrop') return 'backdrop'
+  if (/^s\d+$/.test(slot)) return 'seasons'
+  if (/^s.*e\d+$/.test(slot)) return 'cards'
+  return 'poster'
 }
 
 /**
- * Indexes applied-poster history by item and slot. Sets are keyed by
- * {@link coverageKey}, so a MediUX set and a ThePosterDB set that share an id
- * stay two sets.
+ * Names the art groups a set of slots touches.
+ *
+ * @param slots - Slots from {@link posterSlot}; undefined for a record written before slots were tracked.
+ * @returns Each group once, in {@link ART_GROUPS} order; every group when there are no slots to go by.
+ */
+export function groupsOfSlots(slots: string[] | undefined): ArtGroup[]
+{
+  if (!slots) return [...ART_GROUPS]
+  const touched = new Set(slots.map(slotGroup))
+  return ART_GROUPS.filter(g => touched.has(g))
+}
+
+/** The set that owns an art group on an item, and what the UI needs to show it. */
+export interface ArtOwner
+{
+  /** The set's {@link coverageKey}, or an empty string for a manual upload. */
+  setKey: string
+  source: 'mediux' | 'posterdb'
+  setId?: string
+  uploader?: string
+  thumb?: string
+}
+
+type GroupOwners = Partial<Record<ArtGroup, AppliedRecord>>
+
+/**
+ * Works out which record owns each art group on one item. A record with
+ * explicit groups owns them, the newest such record winning a group. Records
+ * written before groups existed claim what their slots fill, oldest first, so
+ * the latest set to fill a group holds it; explicit ownership wins over that.
+ *
+ * @param records - Every applied record of one item.
+ * @returns The owning record per group; a group nobody filled is absent.
+ */
+function groupOwners(records: AppliedRecord[]): GroupOwners
+{
+  const owners: GroupOwners = {}
+  const time = (r: AppliedRecord) => Date.parse(r.appliedAt) || 0
+  // The sort is stable, so records sharing a timestamp keep their newest-first list order.
+  const oldestFirst = records.slice().sort((a, b) => time(b) - time(a)).reverse()
+  for (const r of oldestFirst)
+  {
+    if (!r.groups) for (const group of groupsOfSlots(r.slots)) owners[group] = r
+  }
+  for (const r of oldestFirst)
+  {
+    for (const group of r.groups ?? []) owners[group] = r
+  }
+  return owners
+}
+
+/**
+ * Lists the groups of an item that a record owns.
+ *
+ * @param r - The record.
+ * @param owners - Ownership of the record's item.
+ * @returns The record's groups, in {@link ART_GROUPS} order.
+ */
+function ownedGroups(r: AppliedRecord, owners: GroupOwners): ArtGroup[]
+{
+  const key = recordCoverageKey(r)
+  return ART_GROUPS.filter(g =>
+  {
+    const owner = owners[g]
+    return !!owner && recordCoverageKey(owner) === key
+  })
+}
+
+/**
+ * Tells which set owns each art group on each item.
  *
  * @param records - Applied-poster history.
- * @returns The coverage index for {@link isSlotCovered}.
+ * @returns Item key to the owner of each group the item has art for.
  */
-export function slotCoverage(records: AppliedRecord[]): SlotCoverage
+export function artOwners(records: AppliedRecord[]): Map<string, Partial<Record<ArtGroup, ArtOwner>>>
 {
-  const coverage: SlotCoverage = { whole: new Map(), slots: new Map() }
-  for (const r of records)
+  const result = new Map<string, Partial<Record<ArtGroup, ArtOwner>>>()
+  for (const [itemKey, list] of appliedByItem(records))
   {
-    const setKey = recordCoverageKey(r)
-    if (!r.slots)
+    const owners: Partial<Record<ArtGroup, ArtOwner>> = {}
+    const byRecord = groupOwners(list)
+    for (const group of ART_GROUPS)
     {
-      let sets = coverage.whole.get(r.itemKey)
-      if (!sets) coverage.whole.set(r.itemKey, (sets = new Set()))
-      sets.add(setKey)
-      continue
+      const r = byRecord[group]
+      if (r) owners[group] = { setKey: recordCoverageKey(r), source: r.source, setId: r.setId, uploader: r.uploader, thumb: r.thumb }
     }
-    let bySlot = coverage.slots.get(r.itemKey)
-    if (!bySlot) coverage.slots.set(r.itemKey, (bySlot = new Map()))
-    for (const slot of r.slots)
-    {
-      let sets = bySlot.get(slot)
-      if (!sets) bySlot.set(slot, (sets = new Set()))
-      sets.add(setKey)
-    }
+    result.set(itemKey, owners)
   }
-  return coverage
+  return result
 }
 
 /**
- * Marks a slot as filled by a set, so later posters in the same run see it.
+ * Tells whether a different set already owns the art group a slot belongs to.
+ * A group nobody owns is free, and the set that owns a group may keep
+ * refreshing it. A manual upload owns under an empty set key, so a job that
+ * has no set of its own (a show or boxset URL) refreshes those but nothing a
+ * set owns.
  *
- * @param coverage - Index from {@link slotCoverage}.
+ * @param owners - Item key to group owners, from {@link artOwners}.
  * @param itemKey - Plex item.
  * @param slot - Slot from {@link posterSlot}.
- * @param setKey - The set that filled it, from {@link coverageKey}.
+ * @param setKey - The set the poster comes from, from {@link coverageKey}.
+ * @returns true when the group has an owner other than that set.
  */
-export function addSlotCoverage(coverage: SlotCoverage, itemKey: string, slot: string, setKey?: string): void
+export function ownedByOther(owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>, itemKey: string, slot: string, setKey?: string): boolean
 {
-  let bySlot = coverage.slots.get(itemKey)
-  if (!bySlot) coverage.slots.set(itemKey, (bySlot = new Map()))
-  let sets = bySlot.get(slot)
-  if (!sets) bySlot.set(slot, (sets = new Set()))
-  sets.add(setKey ?? '')
+  const owner = owners.get(itemKey)?.[slotGroup(slot)]
+  return !!owner && owner.setKey !== (setKey ?? '')
+}
+
+/**
+ * Strips from a run's records the slots whose art group another set owns right now, so
+ * merging them cannot hand that group back. A record left with no slots keeps its
+ * posters and still merges, but claims no group.
+ *
+ * @param records - The records a run built.
+ * @param owners - Item key to group owners as of now, from {@link artOwners}.
+ * @returns The records with the contested slots removed; the originals are not changed.
+ */
+export function yieldToOwners(records: AppliedRecord[], owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>): AppliedRecord[]
+{
+  return records.map(rec =>
+  {
+    const key = recordCoverageKey(rec)
+    return { ...rec, slots: (rec.slots ?? []).filter(slot => !ownedByOther(owners, rec.itemKey, slot, key)) }
+  })
+}
+
+/**
+ * Records that a set now owns a group, so later posters in the same run see it.
+ *
+ * @param owners - Item key to group owners, from {@link artOwners}.
+ * @param itemKey - Plex item.
+ * @param group - The group the set filled.
+ * @param owner - The set that filled it.
+ */
+export function claimGroup(owners: Map<string, Partial<Record<ArtGroup, ArtOwner>>>, itemKey: string, group: ArtGroup, owner: ArtOwner): void
+{
+  let byGroup = owners.get(itemKey)
+  if (!byGroup) owners.set(itemKey, (byGroup = {}))
+  byGroup[group] = owner
 }
 
 /**
@@ -1195,24 +1304,6 @@ export function posterKind(p: Pick<PosterInfo, 'season' | 'episode'>): 'poster' 
   if (p.season === 'Backdrop') return 'backdrop'
   if (p.episode != null) return 'title_card'
   return 'poster'
-}
-
-/**
- * Tells whether art from another set already fills a slot. Records without
- * slots predate slot tracking and count as covering every slot on their item.
- * The poster's own set never blocks it, so an updated card still applies.
- *
- * @param coverage - Index from {@link slotCoverage}.
- * @param itemKey - Plex item.
- * @param slot - Slot from {@link posterSlot}.
- * @param setKey - The set the poster comes from, from {@link coverageKey}.
- * @returns true when a different set has filled the slot.
- */
-export function isSlotCovered(coverage: SlotCoverage, itemKey: string, slot: string, setKey?: string): boolean
-{
-  const own = setKey ?? ''
-  const other = (sets?: Set<string>) => !!sets && [...sets].some(s => s !== own)
-  return other(coverage.whole.get(itemKey)) || other(coverage.slots.get(itemKey)?.get(slot))
 }
 
 /**

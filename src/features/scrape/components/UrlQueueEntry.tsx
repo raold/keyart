@@ -279,7 +279,7 @@ function PosterThumb({
 export default function UrlQueueEntry({ entry, isRunning, patchPoster }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [lightbox, setLightbox] = useState<number | null>(null)
-  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set() })
+  const [appliedIdx, setAppliedIdx] = useState<AppliedIndex>({ setKeys: new Set(), titles: new Set(), posterUrls: new Set(), currentByItem: new Map(), currentPosterUrls: new Set(), owners: new Map() })
   const removeEntry = useScrapeStore(s => s.removeEntry)
 
   const doneCount = entry.posters.filter(p => p.uploadStatus === 'done').length

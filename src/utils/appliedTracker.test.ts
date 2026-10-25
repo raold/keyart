@@ -49,6 +49,23 @@ describe('loadAppliedIndex', () =>
     expect(idx.currentByItem.get('A')).toBe('posterdb:7')
   })
 
+  it('names the set that owns each art group, so a show can mix two sets', async () =>
+  {
+    stubHistory([
+      rec({ itemKey: 'A', setId: '1', source: 'mediux', uploader: 'alpha', thumb: 't1', slots: ['poster', 's1'], groups: ['poster', 'seasons'], appliedAt: '2026-10-01T00:00:00.000Z' }),
+      rec({ itemKey: 'A', setId: '2', source: 'posterdb', uploader: 'beta', slots: ['s1e1', 's1e2'], groups: ['cards'], appliedAt: '2026-10-02T00:00:00.000Z' }),
+    ])
+
+    const idx = await loadAppliedIndex()
+
+    const owners = idx.owners.get('A')
+    expect(owners?.poster).toMatchObject({ setKey: 'mediux:1', source: 'mediux', setId: '1', uploader: 'alpha', thumb: 't1' })
+    expect(owners?.seasons?.setKey).toBe('mediux:1')
+    expect(owners?.cards).toMatchObject({ setKey: 'posterdb:2', source: 'posterdb', uploader: 'beta' })
+    expect(owners?.backdrop).toBeUndefined()
+    expect(idx.owners.has('B')).toBe(false)
+  })
+
   it('is empty without history', async () =>
   {
     vi.stubGlobal('window', { api: { config: { get: async () => ({}) } } })
@@ -60,5 +77,6 @@ describe('loadAppliedIndex', () =>
     expect(idx.posterUrls.size).toBe(0)
     expect(idx.currentByItem.size).toBe(0)
     expect(idx.currentPosterUrls.size).toBe(0)
+    expect(idx.owners.size).toBe(0)
   })
 })
