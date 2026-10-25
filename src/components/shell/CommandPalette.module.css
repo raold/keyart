@@ -8,7 +8,6 @@
   padding-top: 14vh;
   background: rgba(8, 10, 14, 0.55);
   backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 
 .panel {

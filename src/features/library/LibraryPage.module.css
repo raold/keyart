@@ -1389,7 +1389,6 @@
   border-radius: var(--radius-lg);
   background: var(--color-bg-overlay);
   backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: var(--shadow-xl);
 }
 
@@ -2449,6 +2448,11 @@
     padding: var(--space-3) var(--space-4);
     border-right: none;
     border-bottom: 1px solid var(--color-border-subtle);
+  }
+  /* Capped here too, so the sets and a show's mix tray keep their room below. */
+  .panelGallery .artStripBody:not(.artStripBodyCollapsed) .artStripScroll {
+    max-height: clamp(120px, 24vh, 240px);
+    overflow-y: auto;
   }
   .panelGallery .artStrip { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
   .panelGallery .artCard:first-child,
